@@ -1,0 +1,36 @@
+# Secrets & credentials — never commit these
+*.env
+.env.*
+!*.example
+auth.json
+*.token
+bridge.token
+credentials*
+id_rsa*
+*.pem
+
+# Runtime state (task records, logs, sessions)
+.state/
+.codex-a2a/
+*.log
+sessions.json
+tasks.json
+mcp_inflight.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build outputs
+dist/
+build/

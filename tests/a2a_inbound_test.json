@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": "test-1",
+  "method": "message/send",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{"text": "请只回复六个字：A2A入站测试成功", "mediaType": "text/plain"}],
+      "contextId": "ctx-inbound-test-001"
+    }
+  }
+}
