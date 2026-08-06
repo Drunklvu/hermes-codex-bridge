@@ -1,11 +1,10 @@
-"""MCP profile 路由测试：验证 profile 路由与非法 profile 报错"""
+"""MCP profile 路由测试：default + web-dev 两个 profile 都验证"""
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 SERVER = sys.executable
-SCRIPT = str(Path(__file__).resolve().parent.parent / "hermes_mcp_server.py")
+SCRIPT = os.environ.get("HERMES_MCP_SCRIPT", r"C:\\Path\\To\\hermes_mcp_server.py")
 
 
 def frame(payload: dict) -> bytes:

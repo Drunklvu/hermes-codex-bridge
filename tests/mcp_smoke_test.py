@@ -2,10 +2,10 @@
 import json
 import subprocess
 import sys
-from pathlib import Path
+import time
 
 SERVER = sys.executable  # 当前 Python
-SCRIPT = str(Path(__file__).resolve().parent.parent / "hermes_mcp_server.py")
+SCRIPT = os.environ.get("HERMES_MCP_SCRIPT", r"C:\\Path\\To\\hermes_mcp_server.py")
 
 
 def frame(payload: dict) -> bytes:

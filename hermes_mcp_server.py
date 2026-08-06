@@ -16,9 +16,8 @@ Only MCP frames are written to stdout; logs go to stderr.
 
 Configuration via environment variables:
   HERMES_A2A_URL          A2A JSON-RPC endpoint (default http://127.0.0.1:9900)
-  HERMES_PROFILE_URLS     JSON dict overriding the profile -> endpoint map,
-                          e.g. {"main": "http://127.0.0.1:9900", "web": "http://127.0.0.1:9901"}
-                          (default: {"default": ...9900, "web-dev": ...9901})
+  HERMES_DEFAULT_URL      default profile endpoint (defaults to HERMES_A2A_URL)
+  HERMES_WEB_DEV_URL      web-dev profile endpoint (default http://127.0.0.1:9901)
   HERMES_A2A_TOKEN        optional Bearer token sent to Hermes A2A endpoints
   HERMES_TASK_TIMEOUT     max seconds to wait for a task (default 300)
   HERMES_POLL_INTERVAL    seconds between tasks/get polls (default 1.0)
@@ -48,7 +47,9 @@ import signal
 import sys
 import threading
 import time
+import datetime
 import uuid
+from pathlib import Path
 import urllib.error
 import urllib.request
 
@@ -57,23 +58,10 @@ SERVER_NAME = "hermes-mcp-server"
 SERVER_VERSION = "1.0.0"
 
 A2A_URL = os.environ.get("HERMES_A2A_URL", "http://127.0.0.1:9900")
-
-# Profile -> A2A endpoint mapping. Override wholesale with a JSON dict in
-# HERMES_PROFILE_URLS, e.g. {"main": "http://127.0.0.1:9900", "web": "http://127.0.0.1:9901"}
-_DEFAULT_PROFILE_URLS = {
-    "default": "http://127.0.0.1:9900",
-    "web-dev": "http://127.0.0.1:9901",
+PROFILE_PORTS = {
+    "default": os.environ.get("HERMES_DEFAULT_URL", A2A_URL),
+    "web-dev": os.environ.get("HERMES_WEB_DEV_URL", "http://127.0.0.1:9901"),
 }
-try:
-    _env_profile_urls = json.loads(os.environ.get("HERMES_PROFILE_URLS", "{}"))
-    if not isinstance(_env_profile_urls, dict):
-        raise ValueError("HERMES_PROFILE_URLS must be a JSON object")
-    PROFILE_PORTS = {**{str(k): str(v) for k, v in _env_profile_urls.items()}}
-except (json.JSONDecodeError, ValueError) as _exc:
-    _log(f"invalid HERMES_PROFILE_URLS, falling back to defaults: {_exc}")
-    PROFILE_PORTS = dict(_DEFAULT_PROFILE_URLS)
-if not PROFILE_PORTS:
-    PROFILE_PORTS = dict(_DEFAULT_PROFILE_URLS)
 A2A_TOKEN = os.environ.get("HERMES_A2A_TOKEN", "").strip()
 STATE_FILE = os.environ.get(
     "HERMES_STATE_FILE",
@@ -96,6 +84,60 @@ LOG_SUMMARY_CHARS = 200
 RECONCILE_TIMEOUT = 5.0
 CANCEL_TIMEOUT = 5.0
 TRUNCATION_MARKER = "\n\n[Hermes response truncated by MCP bridge]"
+INBOUND_REPORT_URL = os.environ.get("INBOUND_REPORT_URL", "http://127.0.0.1:9998")
+
+
+def _load_inbound_env() -> tuple[str, str]:
+    """从环境变量或 state 目录的 inbound.env（start 脚本生成）读上报配置。
+
+    优先级：环境变量 > inbound.env 文件 > 默认（URL 默认 9998，token 空=禁用）。
+    """
+    url = os.environ.get("INBOUND_REPORT_URL", "")
+    token = os.environ.get("INBOUND_REPORT_TOKEN", "")
+    if url and token:
+        return url, token
+    # 尝试从已知位置读 inbound.env（start_codex_a2a_bridge.ps1 写入）：
+    # 1) 桥 state 目录（脚本父目录的 .codex-a2a 兄弟目录）
+    # 2) 本进程 state 文件所在目录（兜底）
+    candidates = []
+    script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+    candidates.append(script_dir.parent / ".codex-a2a" / "inbound.env")
+    candidates.append(Path(os.path.dirname(os.path.abspath(STATE_FILE))) / "inbound.env")
+    for env_file in candidates:
+        try:
+            with open(env_file, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    value = value.strip()
+                    if key == "INBOUND_REPORT_URL" and not url:
+                        url = value
+                    elif key == "INBOUND_REPORT_TOKEN" and not token:
+                        token = value
+        except OSError:
+            continue
+        if url and token:
+            break
+    return url or "http://127.0.0.1:9998", token
+
+
+_INBOUND_REPORT_URL, _INBOUND_REPORT_TOKEN = _load_inbound_env()
+INBOUND_REPORT_URL = _INBOUND_REPORT_URL
+INBOUND_REPORT_TOKEN = _INBOUND_REPORT_TOKEN
+INBOUND_OUTBOX_FILE = os.environ.get(
+    "INBOUND_OUTBOX_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "inbound_outbox.jsonl"),
+)
+INBOUND_ACK_FILE = os.environ.get(
+    "INBOUND_ACK_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "inbound_outbox.ack"),
+)
+INBOUND_MAX_OUTBOX = int(os.environ.get("INBOUND_MAX_OUTBOX", "500"))
+INBOUND_RETRY_BACKOFF = 2.0  # 指数退避基数（秒）
+INBOUND_REPORT_TIMEOUT = 5.0
+INBOUND_SUMMARY_CHARS = 400  # message/reply 摘要长度上限（与桥一致）
 
 _CONTENT_LENGTH_HEADER_NAMES = {b"content-length", b"content-type"}
 
@@ -110,10 +152,12 @@ TERMINAL_STATES = TERMINAL_FAILED_STATES | {"TASK_STATE_COMPLETED"}
 TOOL_DEFINITION = {
     "name": "call_hermes",
     "description": (
-        "Delegate a task to the local Hermes live agent and wait for its final reply. "
-        "Hermes may use local files, terminal, browser, and other tools, so only send "
-        "tasks you intend to authorize. Do NOT delegate work back to the calling agent "
-        "with this tool (prevents agent-to-agent loops)."
+        "Delegate a concrete task to the local Hermes agent and wait for its final reply. "
+        "Use a structured message (see message format below) for tool-using, multi-step, "
+        "state-changing, or context-dependent work so Hermes has the background, "
+        "authorization boundary, and acceptance criteria it needs. Hermes may perform "
+        "real actions within the stated authorization. Do NOT delegate work back to "
+        "Codex with this tool (prevents Hermes<->Codex loops)."
     ),
     "inputSchema": {
         "type": "object",
@@ -122,16 +166,26 @@ TOOL_DEFINITION = {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": MAX_MESSAGE_CHARS,
-                "description": "Task text sent to Hermes.",
+                "description": (
+                    "Task text sent verbatim to Hermes. Default structured format:\n"
+                    "'请帮我完成以下任务：\n【目标】one-line objective\n"
+                    "【上下文与输入】background, file paths, inputs (or 无)\n"
+                    "【边界与授权】scope + negative list, e.g. 只读；仅限某目录；"
+                    "禁止修改文件/外网/发送\n【交付与验收】expected deliverable, "
+                    "format, length, done-criteria'.\n"
+                    "Each section may be one concise line. Compact prose is allowed "
+                    "only for a trivial one-shot task with no side effects or "
+                    "prior-context dependency; it must still state the concrete "
+                    "objective and desired answer (never just 'hi')."
+                ),
             },
             "profile": {
                 "type": "string",
-                "enum": sorted(PROFILE_PORTS),
-                "default": "default" if "default" in PROFILE_PORTS else sorted(PROFILE_PORTS)[0],
+                "enum": ["default", "web-dev"],
+                "default": "default",
                 "description": (
-                    "Which local Hermes agent instance (profile) to run the task on. "
-                    "Each profile maps to a separate A2A endpoint (see HERMES_PROFILE_URLS). "
-                    "The 'default' profile is the primary agent."
+                    "Which Hermes profile to run the task on. default = main profile (port 9900); "
+                    "web-dev = second profile for web development (port 9901)."
                 ),
             },
             "context_id": {
@@ -140,9 +194,14 @@ TOOL_DEFINITION = {
                 "maxLength": MAX_CONTEXT_ID_CHARS,
                 "pattern": r"^[A-Za-z0-9._-]+$",
                 "description": (
-                    "Conversation/session id. Reuse the same id to continue a prior "
-                    "conversation with full context; omit for a fresh one-shot task. "
-                    "Suggested naming: '<project>-<topic>' (e.g. 'docs-migration')."
+                    "Conversation/session id (logical workstream). REUSE the same id "
+                    "for follow-up tasks in the same workstream so Hermes continues "
+                    "with full context; omit for a fresh one-shot task. When "
+                    "continuing, also add 【已确认】 (confirmed results so far) and "
+                    "【本轮目标】 (this round's increment) to the message. Suggested "
+                    "naming: '<project>-<workstream>' (e.g. 'demo-project'). Use a "
+                    "'-review' suffix for independent reviews (isolation) and "
+                    "'-parallel-a/b' for concurrent tasks on the same topic."
                 ),
             },
         },
@@ -369,6 +428,154 @@ class _StateStore:
             _log(f"state write failed (continuing): {_short(exc)}")
 
 
+class _InboundReporter:
+    """反向链路事件上报器：JSONL outbox + 后台发送线程 + 指数退避重试。
+
+    call_hermes 同步 append 事件到 outbox（追加写，原子性靠单行 JSON），
+    后台线程消费投递到桥的 POST /inbound/events。已确认的 event_id 记录
+    在 ack 文件（避免积压重复发送）。上报失败绝不影响 call_hermes 结果。
+    """
+
+    def __init__(self, url: str, token: str, outbox_file: str, ack_file: str):
+        self.url = url.rstrip("/")
+        self.token = token
+        self.outbox_file = outbox_file
+        self.ack_file = ack_file
+        self._lock = threading.RLock()
+        self._ack: set[str] = set()
+        self._load_ack()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="inbound-reporter", daemon=True)
+        self._thread.start()
+
+    def _load_ack(self) -> None:
+        try:
+            with open(self.ack_file, "r", encoding="utf-8") as fh:
+                self._ack = {line.strip() for line in fh if line.strip()}
+        except OSError:
+            self._ack = set()
+
+    def _save_ack(self) -> None:
+        try:
+            # 原子写：临时文件 + os.replace，多进程共享 ack 时避免半写/交错
+            tmp = self.ack_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                for eid in sorted(self._ack):
+                    fh.write(eid + "\n")
+            os.replace(tmp, self.ack_file)
+        except OSError:
+            pass  # ack 丢失只导致重复投递，桥端幂等兜底
+
+    def append(self, event: dict) -> None:
+        """同步追加一个事件到 outbox（不阻塞、不抛出影响调用方）。"""
+        event_id = event.get("event_id") or ""
+        if not event_id:
+            return
+        try:
+            with self._lock:
+                with open(self.outbox_file, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            _log(f"inbound outbox append failed: {_short(exc)}")
+
+    def _run(self) -> None:
+        """后台线程：读取未确认事件，指数退避投递，成功后记录 ack。"""
+        backoff = INBOUND_RETRY_BACKOFF
+        while not self._stop.is_set():
+            try:
+                pending = self._read_pending()
+                if pending:
+                    for event in pending:
+                        if self._stop.is_set():
+                            return
+                        if self._deliver(event):
+                            with self._lock:
+                                self._ack.add(event["event_id"])
+                                self._save_ack()
+                            backoff = INBOUND_RETRY_BACKOFF
+                        else:
+                            backoff = min(backoff * 2, 60)
+                            break  # 失败：等退避后重试同一批
+                else:
+                    backoff = INBOUND_RETRY_BACKOFF
+            except Exception as exc:
+                _log(f"inbound reporter error: {_short(exc)}")
+            self._stop.wait(backoff)
+
+    def _read_pending(self) -> list[dict]:
+        try:
+            with self._lock:
+                with open(self.outbox_file, "r", encoding="utf-8") as fh:
+                    lines = fh.readlines()
+            pending = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                eid = event.get("event_id") or ""
+                if eid and eid not in self._ack:
+                    pending.append(event)
+            return pending[:INBOUND_MAX_OUTBOX]
+        except OSError:
+            return []
+
+    def _deliver(self, event: dict) -> bool:
+        if not self.token:
+            return True  # 未配置 token：视为投递成功（监控不可用时静默降级）
+        try:
+            req = urllib.request.Request(
+                self.url + "/",
+                data=json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": event["event_id"],
+                        "method": "inbound/events",
+                        "params": event,
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.token}"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=INBOUND_REPORT_TIMEOUT) as resp:
+                return 200 <= resp.status < 300
+        except Exception as exc:
+            _log(f"inbound report failed (will retry): {_short(exc)}")
+            return False
+
+    def flush(self, timeout: float = 5.0) -> None:
+        """退出前尽力投递剩余事件（不保证成功）。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                pending = self._read_pending()
+                if not pending:
+                    return
+                if all(self._deliver(e) for e in pending):
+                    return
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+    def shutdown(self) -> None:
+        self._stop.set()
+
+
+_reporter: _InboundReporter | None = None
+
+
+def _get_reporter() -> _InboundReporter:
+    global _reporter
+    if _reporter is None:
+        _reporter = _InboundReporter(
+            INBOUND_REPORT_URL, INBOUND_REPORT_TOKEN, INBOUND_OUTBOX_FILE, INBOUND_ACK_FILE
+        )
+    return _reporter
+
+
 _request_counter = 0
 
 
@@ -472,6 +679,23 @@ def _extract_reply(task: dict) -> str:
         return reply
     keep = max(0, MAX_REPLY_CHARS - len(TRUNCATION_MARKER))
     return reply[:keep] + TRUNCATION_MARKER
+
+
+def utc_timestamp() -> str:
+    """ISO-8601 UTC 时间戳（与桥的格式一致）。"""
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _norm_state(gateway_state: str) -> str:
+    """Hermes gateway 原始状态 -> 监控规范状态。"""
+    mapping = {
+        "TASK_STATE_WORKING": "WORKING",
+        "TASK_STATE_COMPLETED": "COMPLETED",
+        "TASK_STATE_FAILED": "FAILED",
+        "TASK_STATE_REJECTED": "FAILED",
+        "TASK_STATE_CANCELED": "CANCELED",
+    }
+    return mapping.get(str(gateway_state).upper(), "UNKNOWN")
 
 
 _default_store_instance = None
@@ -607,8 +831,8 @@ def call_hermes(
 ) -> str:
     """Send ``message`` to Hermes, poll until completion, return reply text.
 
-    ``profile`` selects the local Hermes agent instance (see PROFILE_PORTS).
-    ``base_url`` overrides profile routing entirely.
+    ``profile`` selects the Hermes profile: ``default`` (9900) or
+    ``web-dev`` (9901). ``base_url`` overrides profile routing entirely.
     ``context_id`` reuses a conversation (continue with prior context);
     omit for a fresh one-shot task. ``state_store`` overrides the default
     in-flight state file (used by tests and embedded callers).
@@ -649,6 +873,30 @@ def call_hermes(
 
     store = state_store if state_store is not None else _default_store()
     context_id = context_id or f"ctx-{uuid.uuid4().hex}"
+    operation_id = f"op-{uuid.uuid4().hex}"
+    reporter = _get_reporter()
+
+    def _emit(phase: str, **extra) -> None:
+        """发一个 inbound 事件到 outbox（尽力而为，绝不抛出）。"""
+        try:
+            event = {
+                "schema_version": 1,
+                "event_id": f"evt-{uuid.uuid4().hex[:16]}",
+                "operation_id": operation_id,
+                "phase": phase,
+                "direction": "inbound",
+                "source": "hermes_mcp",
+                "profile": profile,
+                "context_id": context_id,
+                "observed_at": utc_timestamp(),
+            }
+            event.update(extra)
+            reporter.append(event)
+        except Exception:
+            pass
+
+    # STARTED 必须在 message/send 之前落 outbox（崩溃也能补投）
+    _emit("started", message_summary=message[:INBOUND_SUMMARY_CHARS])
     send_params = {
         "message": {
             "role": "user",
@@ -670,6 +918,16 @@ def call_hermes(
     task_id = task.get("id")
     state = str((task.get("status") or {}).get("state", "")).upper()
 
+    if task_id:
+        _emit(
+            "accepted",
+            gateway_task_id=task_id,
+            gateway_state=state,
+            state=_norm_state(state),
+        )
+    else:
+        # 无 task id：提交结果未知，不能假报 FAILED
+        _emit("state", state="UNKNOWN", error_category="submission_unknown")
     if task_id and state not in TERMINAL_STATES:
         store.record(task_id, profile, context_id)
 
@@ -678,6 +936,12 @@ def call_hermes(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             cancel_result, _ = _best_effort_cancel(base_url, task_id, store)
+            _emit(
+                "finished",
+                gateway_task_id=task_id,
+                state="UNKNOWN" if not cancel_result else "CANCELED",
+                error_category="timeout",
+            )
             raise A2AError(
                 f"Hermes task {task_id} did not finish within {task_timeout:.0f}s; cancel: {cancel_result}",
                 category="timeout",
@@ -700,12 +964,26 @@ def call_hermes(
             exc.task_id = task_id
             raise
         state = str((task.get("status") or {}).get("state", "")).upper()
+        _emit(
+            "state",
+            gateway_task_id=task_id,
+            gateway_state=state,
+            state=_norm_state(state),
+        )
 
     if state == "TASK_STATE_COMPLETED":
         if task_id:
             store.remove(task_id)
         try:
-            return _extract_reply(task)
+            reply = _extract_reply(task)
+            _emit(
+                "finished",
+                gateway_task_id=task_id,
+                gateway_state=state,
+                state="COMPLETED",
+                reply_summary=reply[:INBOUND_SUMMARY_CHARS],
+            )
+            return reply
         except A2AError as exc:
             exc.category = "empty_reply"
             exc.task_id = task_id
@@ -713,6 +991,13 @@ def call_hermes(
     if state in TERMINAL_FAILED_STATES:
         if task_id:
             store.remove(task_id)
+        _emit(
+            "finished",
+            gateway_task_id=task_id,
+            gateway_state=state,
+            state=_norm_state(state),
+            error_category="task_failed",
+        )
         raise A2AError(
             f"Hermes task {task_id} ended in state {state}",
             category="task_failed",
@@ -935,7 +1220,11 @@ def main() -> None:
     store = _default_store()
     _install_signal_handlers(store)
     _start_reconcile_thread(store)
-    _log(f"{SERVER_NAME} v{SERVER_VERSION} started; A2A endpoint {A2A_URL}; state {STATE_FILE}")
+    reporter = _get_reporter()
+    _log(
+        f"{SERVER_NAME} v{SERVER_VERSION} started; A2A endpoint {A2A_URL}; "
+        f"state {STATE_FILE}; inbound report {'ON' if INBOUND_REPORT_TOKEN else 'OFF'}"
+    )
     stream = sys.stdin.buffer
     try:
         while True:
@@ -988,6 +1277,12 @@ def main() -> None:
             _cancel_all_inflight(_default_store())
         except Exception as exc:
             _log(f"exit cancel sweep failed: {_short(exc)}")
+        # 尽力补投剩余 inbound 事件
+        try:
+            reporter.flush(timeout=3.0)
+            reporter.shutdown()
+        except Exception as exc:
+            _log(f"exit inbound flush failed: {_short(exc)}")
 
 
 if __name__ == "__main__":

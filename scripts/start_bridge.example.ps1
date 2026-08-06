@@ -1,21 +1,14 @@
 $ErrorActionPreference = 'Stop'
 
-# ==== EDIT THESE PATHS FOR YOUR MACHINE ====
-# Python executable (pythonw.exe on Windows avoids a console window)
-$python = 'C:\Path\To\Python311\pythonw.exe'
-# Absolute path to codex_a2a_bridge.py
-$bridge = 'C:\Path\To\hermes-codex-bridge\codex_a2a_bridge.py'
-# Workspace directory handed to Codex (working dir for delegated tasks)
-$workspace = 'C:\Path\To\your-workspace'
+$python = 'C:\Path\To\pythonw.exe'
+$bridge = 'C:\Path\To\a2a-bridge\codex_a2a_bridge.py'
+$workspace = 'C:\Path\To\Workspace'
 $port = 9998
-# State directory holds the Bearer token and task records — keep it private
-$stateDir = 'C:\Path\To\hermes-codex-bridge\.state'
+$stateDir = 'C:\Path\To\Workspace\tools\.codex-a2a'
 $tokenFile = Join-Path $stateDir 'bridge.token'
-# Native Codex executable (resolved automatically below if not found)
 $codex = Get-ChildItem -LiteralPath 'C:\Path\To\Codex\bin' -Recurse -Filter 'codex.exe' -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1 -ExpandProperty FullName
-# ==== END EDIT ====
 
 if (-not (Test-Path -LiteralPath $python)) { throw "Python not found: $python" }
 if (-not (Test-Path -LiteralPath $bridge)) { throw "Bridge not found: $bridge" }
@@ -34,6 +27,17 @@ if (Test-Path -LiteralPath $tokenFile) {
 if (-not $token) {
     $token = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
     Set-Content -LiteralPath $tokenFile -Value $token -Encoding ASCII -NoNewline
+}
+
+# Inbound report token (reverse link: MCP server -> bridge /inbound/events)
+$inboundTokenFile = Join-Path $stateDir 'inbound.token'
+$inboundToken = $null
+if (Test-Path -LiteralPath $inboundTokenFile) {
+    $inboundToken = (Get-Content -LiteralPath $inboundTokenFile -Raw -ErrorAction SilentlyContinue).Trim()
+}
+if (-not $inboundToken) {
+    $inboundToken = [guid]::NewGuid().ToString('N')
+    Set-Content -LiteralPath $inboundTokenFile -Value $inboundToken -Encoding ASCII -NoNewline
 }
 
 # Port in use: confirm the listener is actually this bridge before treating it as "already running".
@@ -62,10 +66,18 @@ $arguments = @(
     '--port', "$port",
     '--workspace', '"' + $workspace + '"',
     '--codex', '"' + $codex + '"',
+    '--state-dir', '"' + $stateDir + '"',
     '--sync-wait', '540',
     '--codex-timeout', '1800',
     '--max-concurrent', '1',
-    '--token-file', '"' + $tokenFile + '"'
+    '--token-file', '"' + $tokenFile + '"',
+    '--inbound-token', '"' + $inboundToken + '"'
 ) -join ' '
 
-Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory (Split-Path $bridge) -WindowStyle Hidden
+Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory 'C:\Path\To\Workspace' -WindowStyle Hidden
+
+# Also write an env file so the MCP server (hermes_mcp_server.py) can pick up
+# the inbound report token without hardcoding it.
+$envFile = Join-Path $stateDir 'inbound.env'
+"INBOUND_REPORT_TOKEN=$inboundToken" | Set-Content -LiteralPath $envFile -Encoding ASCII
+"INBOUND_REPORT_URL=http://127.0.0.1:$port" | Add-Content -LiteralPath $envFile -Encoding ASCII

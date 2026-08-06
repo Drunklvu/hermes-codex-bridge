@@ -5,6 +5,41 @@
 Bidirectional local collaboration between **Codex** and **Hermes Agent** over the
 [A2A protocol](https://a2a-protocol.org) (JSON-RPC over HTTP, loopback only).
 
+> **The core idea: each agent gains the ability to use another agent.**
+> Hermes can call Codex mid-task (like you directing an assistant), and Codex can
+> call Hermes the other way — so you are no longer the human conveyor belt
+> copy-pasting context between them.
+
+## What is this? (plain English)
+
+**Two AI agents on your machine, talking to each other.**
+
+- **Codex** (the coding agent) and **Hermes** (your assistant agent) usually live in
+  separate worlds. This project builds a two-way bridge between them:
+  - Codex can ask Hermes to do things (query a knowledge base, fetch a page,
+    run a local check) and get a final answer back.
+  - Hermes can ask Codex to write or review code, and get a finished result back.
+- It is **local-first**: everything runs on your machine over loopback; nothing is
+  sent to a cloud broker.
+- It comes with a **live monitoring dashboard** (`/ui`) that shows every call in
+  both directions — grouped by conversation, with status, timing, and full
+  transcripts. Think of it as *a phone bill that also shows you what was said*.
+- It keeps related calls in the **same conversation** (workstreams), so a follow-up
+  task remembers the context instead of starting from scratch every time.
+
+> In short: **one control room for two agents.** Use it when you want Codex and
+> Hermes to cooperate on a task without copy-pasting context between them.
+
+### What you can do with it
+
+| Goal | How this project helps |
+|---|---|
+| **Hand tasks between agents** | Codex asks Hermes to research / fetch / verify something and gets a clean answer; Hermes asks Codex to build or review code and gets a finished result — no manual copy-paste. |
+| **Keep conversations coherent** | Related calls automatically stay in the same workstream (`ctx-<name>#01`, `#02`, ...), so follow-ups remember context. Independent reviews get their own thread (`-review`) to avoid bias. |
+| **See everything happening** | The live dashboard (`/ui`) shows every call both ways: status, timing, who said what, and full transcripts — with stats, filters, and search. |
+| **Clean up when done** | Delete a single call or a whole conversation from the dashboard; stale sessions auto-hide; connectivity-test noise is grouped separately for one-click cleanup. |
+| **Stay safe locally** | Loopback-only, token-authenticated, with crash recovery and heartbeat monitoring — nothing leaves your machine. |
+
 Two components in one repo:
 
 | Component | File | What it does |
@@ -39,6 +74,24 @@ Two components in one repo:
 - Optional shared Bearer token (via `--token`, `--token-file`, or `A2A_BRIDGE_TOKEN`).
 - Bounded concurrency (`--max-concurrent`), heartbeat-based crash detection, task queue with rejection when full, `/health` endpoint.
 - Handles terminal task states (completed / failed / canceled / rejected) and streams results back to Hermes.
+
+**Live monitoring UI (`/ui`)**
+- Real-time dashboard: tasks grouped by conversation (context_id), direction chips (inbound/outbound), status badges, generation markers, noise-grouping for connectivity/echo-check traffic.
+- Stats cards, status distribution bar, direction donut (pure CSS), recent activity feed.
+- Conversation timeline per role (user / assistant / tool / system), local-time display.
+- Filter by state + keyword search; delete single call or whole conversation via a styled `<dialog>` confirm (Bearer-token protected DELETE).
+- Orphan filtering: tasks whose Codex session file no longer exists are hidden automatically.
+
+**Reverse-link reporting (Codex → Hermes visibility)**
+- `POST /inbound/events` on the bridge (separate `--inbound-token`): the MCP server reports started/accepted/state/finished events so reverse calls show up on the dashboard.
+- Durable outbox on the MCP side (JSONL + ack + exponential backoff): no event is lost on crash; idempotent by operation_id; tombstone prevents deleted tasks from resurrecting.
+
+**Session management**
+- Workstream registry: callers pass a logical name (e.g. `demo-project`), the bridge resolves generations (`ctx-<name>#01`, `#02`, ...) and resumes the same Codex session for follow-ups.
+- Health checks (estimated tokens / message count / file size / idle days) with warning markers; optional auto-rotation (`WS_AUTO_ROTATE`); archive + cleanup.
+
+**Prompt convention (both directions)**
+- Recommended structured message template: 【目标】【上下文与输入】【边界与授权】【交付与验收】 — default required for tool-using/multi-step/state-changing work; compact prose allowed only for trivial one-shot tasks (never just `hi`). See `tools` description of `call_hermes` and the README examples.
 
 ## Requirements
 
@@ -153,7 +206,7 @@ The full protocol walkthrough (initialize → tools/list → real `call_hermes`)
 ## Testing
 
 ```bash
-# Full unit suite (44 tests, no Hermes needed)
+# Full unit suite (113 tests, no Hermes needed)
 python -m unittest discover -s tests -p "test_*.py" -v
 
 # MCP protocol smoke test (initialize → tools/list → tools/call), needs a live

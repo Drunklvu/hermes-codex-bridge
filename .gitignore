@@ -16,6 +16,10 @@ id_rsa*
 sessions.json
 tasks.json
 mcp_inflight.json
+*outbox*.jsonl
+*outbox*.ack
+inbound_outbox.jsonl
+inbound_outbox.ack
 
 # Python
 __pycache__/

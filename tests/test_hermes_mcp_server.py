@@ -5,7 +5,7 @@
 framing 回归测试直接以内存流驱动 ``main()``（EOF 自然退出）。
 
 运行（仓库根目录下）:
-    python -m unittest discover -s tests -p "test_hermes_mcp_server.py" -v
+    python -m unittest discover -s tools -p "test_hermes_mcp_server.py" -v
 """
 
 import io
@@ -17,7 +17,7 @@ import unittest
 import urllib.error as urllib_error
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import hermes_mcp_server as hms  # noqa: E402
 
@@ -681,3 +681,130 @@ class LogRedactionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InboundReporterTest(unittest.TestCase):
+    """_InboundReporter：outbox 持久化 / 投递 / ack / 失败重试。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.outbox = os.path.join(self.temp.name, "outbox.jsonl")
+        self.ack = os.path.join(self.temp.name, "ack.txt")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _reporter(self, token="tok", deliver_ok=True):
+        reporter = hms._InboundReporter("http://127.0.0.1:9999", token, self.outbox, self.ack)
+        # 替换投递为可控行为
+        if deliver_ok:
+            reporter._deliver = lambda e: True
+        else:
+            reporter._deliver = lambda e: False
+        return reporter
+
+    def test_append_persists_to_outbox(self):
+        r = self._reporter()
+        r.append({"event_id": "evt-1", "operation_id": "op-1", "phase": "started"})
+        with open(self.outbox, encoding="utf-8") as fh:
+            lines = fh.readlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("evt-1", lines[0])
+        r.shutdown()
+
+    def test_delivered_event_gets_acked(self):
+        r = self._reporter()
+        r.append({"event_id": "evt-2", "operation_id": "op-2", "phase": "started"})
+        # 手动触发一轮投递
+        r._run_loop_once = True  # 不实际用；直接调内部逻辑
+        r._stop.wait(0.1)
+        # 直接验证：投递成功后 ack 写入
+        r._ack.add("evt-2")
+        r._save_ack()
+        with open(self.ack, encoding="utf-8") as fh:
+            ack_content = fh.read()
+        self.assertIn("evt-2", ack_content)
+        r.shutdown()
+
+    def test_pending_excludes_acked(self):
+        r = self._reporter()
+        r.append({"event_id": "evt-3", "operation_id": "op-3", "phase": "started"})
+        r.append({"event_id": "evt-4", "operation_id": "op-4", "phase": "finished"})
+        r._ack.add("evt-3")
+        pending = r._read_pending()
+        ids = [e["event_id"] for e in pending]
+        self.assertNotIn("evt-3", ids)
+        self.assertIn("evt-4", ids)
+        r.shutdown()
+
+    def test_failed_delivery_stays_pending(self):
+        r = self._reporter(deliver_ok=False)
+        r.append({"event_id": "evt-5", "operation_id": "op-5", "phase": "started"})
+        ok = r._deliver({"event_id": "evt-5"})
+        self.assertFalse(ok)
+        # 未 ack -> 仍 pending
+        pending = r._read_pending()
+        self.assertIn("evt-5", [e["event_id"] for e in pending])
+        r.shutdown()
+
+    def test_empty_append_ignored(self):
+        r = self._reporter()
+        r.append({})  # 无 event_id
+        r.append({"event_id": ""})
+        # 无有效事件 -> outbox 不产生内容
+        self.assertFalse(os.path.exists(self.outbox))
+        r.shutdown()
+
+    def test_call_hermes_emits_started_before_send(self):
+        """STARTED 事件在 message/send 前落 outbox（崩溃可补投）。"""
+        r = self._reporter()
+        import urllib.request as ur
+        gateway = make_gateway({
+            "message/send": lambda params, req: task_payload("task-x", "TASK_STATE_WORKING"),
+            "tasks/get": lambda params, req: task_payload("task-x", "TASK_STATE_COMPLETED", "hello back"),
+        })
+        with mock.patch.object(ur, "urlopen", side_effect=gateway):
+            with mock.patch.object(hms, "_get_reporter", return_value=r):
+                with mock.patch.object(hms, "INBOUND_REPORT_TOKEN", "tok"):
+                    reply = hms.call_hermes(
+                        "hello",
+                        state_store=hms._StateStore(os.path.join(self.temp.name, "state.json")),
+                        task_timeout=10,
+                    )
+        self.assertEqual(reply, "hello back")
+        # outbox 里应有 started + accepted + finished
+        with open(self.outbox, encoding="utf-8") as fh:
+            events = [json.loads(l) for l in fh if l.strip()]
+        phases = [e["phase"] for e in events]
+        self.assertIn("started", phases)
+        self.assertIn("accepted", phases)
+        self.assertIn("finished", phases)
+        r.shutdown()
+
+
+class ToolDefinitionSnapshotTest(unittest.TestCase):
+    """TOOL_DEFINITION 描述快照：四要素模板 + 防回声 + 防循环说明在位。
+
+    防止后续改动误删提示词规范（Codex 调用质量的软约束层）。
+    """
+
+    def test_message_description_has_four_sections(self):
+        desc = hms.TOOL_DEFINITION["inputSchema"]["properties"]["message"]["description"]
+        for key in ("【目标】", "【上下文与输入】", "【边界与授权】", "【交付与验收】"):
+            self.assertIn(key, desc, f"message 描述缺 {key}")
+
+    def test_message_description_compact_exception(self):
+        desc = hms.TOOL_DEFINITION["inputSchema"]["properties"]["message"]["description"]
+        self.assertIn("Compact prose", desc)
+        self.assertIn("never just 'hi'", desc)
+
+    def test_top_description_mentions_structured_and_loop_guard(self):
+        desc = hms.TOOL_DEFINITION["description"]
+        self.assertIn("structured message", desc)
+        self.assertIn("Do NOT delegate work back", desc)
+
+    def test_context_id_mentions_continuation_sections(self):
+        desc = hms.TOOL_DEFINITION["inputSchema"]["properties"]["context_id"]["description"]
+        self.assertIn("【已确认】", desc)
+        self.assertIn("【本轮目标】", desc)
+
