@@ -91,7 +91,33 @@ Two components in one repo:
 - Health checks (estimated tokens / message count / file size / idle days) with warning markers; optional auto-rotation (`WS_AUTO_ROTATE`); archive + cleanup.
 
 **Prompt convention (both directions)**
-- Recommended structured message template: 【目标】【上下文与输入】【边界与授权】【交付与验收】 — default required for tool-using/multi-step/state-changing work; compact prose allowed only for trivial one-shot tasks (never just `hi`). See `tools` description of `call_hermes` and the README examples.
+- Recommended structured message template: 【目标】【上下文与输入】【边界与授权】【交付与验收】 — default required for tool-using/multi-step/state-changing work; compact prose allowed only for trivial one-shot tasks (never just `hi`). See the examples below.
+
+**Message examples**
+
+*Full task (default):*
+```text
+请帮我完成以下任务：
+【目标】检查 codex_a2a_bridge.py 的 delete_task，找出共享 context 误删会话文件的漏洞
+【上下文与输入】文件 codex_a2a_bridge.py，删除逻辑在 delete_task 方法
+【边界与授权】只读分析，不修改任何文件；不访问外网
+【交付与验收】给出漏洞点（带行号）+ 修复建议，300 字内
+```
+
+*Compact task (trivial one-shot only):*
+```text
+请直接回答：解释 A2A 的 tasks/get 轮询为什么拿不到中间思考链。只读，3 点以内。
+```
+
+*Continuing an existing conversation (reuse the same context_id):*
+```text
+请帮我完成以下任务：
+【已确认】上一轮已确认：白屏根因是 JS 转义，已修复并验证
+【本轮目标】现在检查监控页切换对话不更新的问题
+【上下文与输入】同上，codex_a2a_bridge.py
+【边界与授权】只读分析，不改文件
+【交付与验收】根因 + 行号 + 修复建议
+```
 
 ## Requirements
 
