@@ -134,8 +134,27 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1
 ```
 
 The installer auto-detects Python / Codex / Hermes, registers the MCP server in
-`~/.codex/config.toml`, registers the `codex` peer in Hermes, creates a startup
-shortcut, and starts the bridge. Uninstall with `-Uninstall`; dry-run with `-DryRun`.
+`~/.codex/config.toml`, registers the `codex` peer in Hermes (capabilities written
+as a real YAML list via Python+PyYAML), creates a startup shortcut, generates a
+real `scripts/start_bridge.ps1` from the example (placeholder paths and port
+filled in), and starts the bridge.
+
+It is **idempotent**: re-running on an already-configured setup skips unchanged
+settings. Uninstall with `-Uninstall` (stops the bridge, removes the MCP
+registration and startup shortcut); dry-run with `-DryRun` (detect only, write
+nothing).
+
+| Parameter | Purpose |
+|---|---|
+| `-Python <path>` | Python interpreter for the MCP server (default: auto-detect `python.exe`; the bridge itself uses `pythonw.exe`) |
+| `-Codex <path>` | Codex executable (default: auto-detect) |
+| `-HermesCli <path>` | Hermes CLI (default: auto-detect; point at a stub for sandbox testing) |
+| `-BridgeDir <path>` | Directory containing the bridge scripts (default: repo root) |
+| `-Workspace <path>` | Codex working directory (default: parent of bridge dir) |
+| `-Port <int>` | Bridge port (default 9998) |
+
+> ⚠️ The generated `scripts/start_bridge.ps1` contains your local absolute paths —
+> it is a machine-local file and is not meant to be committed.
 
 ## Setup
 

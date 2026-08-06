@@ -126,7 +126,23 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1
 ```
 
 安装器自动探测 Python / Codex / Hermes，注册 MCP server（`~/.codex/config.toml`）、
-注册 Hermes 的 codex peer、创建开机自启、启动桥。卸载用 `-Uninstall`，只探测用 `-DryRun`。
+注册 Hermes 的 codex peer（capabilities 用 Python+PyYAML 写成真正的 YAML 列表）、
+创建开机自启、从示例生成真实 `scripts/start_bridge.ps1`（占位符路径和端口自动填充）、
+启动桥。
+
+**幂等**：对已配置好的环境重复运行会跳过未变化的配置。卸载用 `-Uninstall`
+（停止桥、移除 MCP 注册和自启）；只探测用 `-DryRun`（不写任何东西）。
+
+| 参数 | 作用 |
+|------|------|
+| `-Python <path>` | MCP server 用的 Python 解释器（默认自动探测 `python.exe`；桥本身用 `pythonw.exe`） |
+| `-Codex <path>` | Codex 可执行文件（默认自动探测） |
+| `-HermesCli <path>` | Hermes CLI（默认自动探测；沙箱测试可指向假 CLI） |
+| `-BridgeDir <path>` | 桥脚本所在目录（默认仓库根） |
+| `-Workspace <path>` | Codex 工作目录（默认桥目录的上级） |
+| `-Port <int>` | 桥端口（默认 9998） |
+
+> ⚠️ 生成的 `scripts/start_bridge.ps1` 含你的本地绝对路径——是机器本地文件，不要提交。
 
 ## 安装
 
