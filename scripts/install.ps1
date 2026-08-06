@@ -29,6 +29,20 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# ---------- 工具函数 ----------
+# 写文件用 UTF-8 无 BOM（PowerShell 5.1 的 Set-Content -Encoding UTF8 会写 BOM，
+# 破坏 TOML 解析——Codex 审查 #2）
+function Write-Utf8NoBom {
+    param([string]$Path, [string]$Content)
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
+}
+# TOML 转义：单反斜杠 -> 双反斜杠（TOML 字符串里 \ 才是字面 \，Codex 审查 #1）
+function ConvertTo-TomlPath {
+    param([string]$P)
+    return $P.Replace('\', '\\').Replace('"', '\"')
+}
+
 # ---------- 路径探测 ----------
 # install.ps1 在 scripts/ 子目录，桥脚本在仓库根（上级目录）
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -46,17 +60,24 @@ $startScript = Join-Path $BridgeDir 'scripts\start_bridge.example.ps1'
 
 if (-not $Workspace) { $Workspace = Split-Path -Parent $BridgeDir }
 
-# 探测 python
+# 探测 python（MCP 用 python.exe 保证 stdio；桥用 pythonw.exe 后台运行）
 if (-not $Python) {
-    $pythonw = (Get-Command pythonw.exe -ErrorAction SilentlyContinue).Source
     $python  = (Get-Command python.exe  -ErrorAction SilentlyContinue).Source
-    if ($pythonw) { $Python = $pythonw }
-    elseif ($python) { $Python = $python }
-    else {
-        # 常见安装位置兜底
-        $cand = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python" -Recurse -Filter pythonw.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($cand) { $Python = $cand.FullName }
+    $pythonw = (Get-Command pythonw.exe -ErrorAction SilentlyContinue).Source
+    if (-not $python) {
+        $cand = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python" -Recurse -Filter python.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cand) { $python = $cand.FullName }
     }
+    if (-not $pythonw) {
+        $candw = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python" -Recurse -Filter pythonw.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($candw) { $pythonw = $candw.FullName }
+    }
+    $Python = $python   # 默认用 python.exe（stdio 可用）
+    $PythonW = $pythonw # 桥后台用
+} else {
+    # 手动指定：同目录推断 pythonw
+    $PythonW = Join-Path (Split-Path -Parent $Python) 'pythonw.exe'
+    if (-not (Test-Path -LiteralPath $PythonW)) { $PythonW = $Python }
 }
 
 # 探测 codex 可执行文件
@@ -107,15 +128,25 @@ if ($DryRun) {
 # ---------- 卸载 ----------
 if ($Uninstall) {
     Write-Host "=== 卸载 ===" -ForegroundColor Cyan
-    # 1. 移除 Codex MCP 注册
+    # 0. 尝试停止运行中的桥（不要求存在）
+    try {
+        $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+        if ($listener) {
+            Stop-Process -Id $listener.OwningProcess -Force -ErrorAction SilentlyContinue
+            Write-Host "  [0/4] 已停止运行中的桥" -ForegroundColor Green
+        }
+    } catch { Write-Host "  [0/4] 停止桥失败（可手动结束进程）" -ForegroundColor Yellow }
+    # 1. 移除 Codex MCP 注册（config.toml 不存在则跳过，不报错）
     if (Test-Path -LiteralPath $codexConfigToml) {
         $toml = Get-Content -LiteralPath $codexConfigToml -Raw
-        if ($toml -match '(?ms)^\[mcp_servers\.hermes\].*?(?=^\[|\z)') {
-            $toml = $toml -replace '(?ms)^\[mcp_servers\.hermes\].*?(?=^\[|\z)', ''
-            Set-Content -LiteralPath $codexConfigToml -Value $toml -Encoding UTF8
+        if (-not $toml) { $toml = "" }
+        if ($toml -match '(?ms)^\[mcp_servers\.hermes\]') {
+            $re = [regex]'(?ms)^\[mcp_servers\.hermes\].*?(?=^\[|\z)'
+            $toml = $re.Replace($toml, '', 1)
+            Write-Utf8NoBom -Path $codexConfigToml -Content $toml
             Write-Host "  [1/4] 已移除 Codex MCP 注册 [mcp_servers.hermes]" -ForegroundColor Green
         } else { Write-Host "  [1/4] Codex MCP 注册不存在，跳过" }
-    }
+    } else { Write-Host "  [1/4] config.toml 不存在，跳过" }
     # 2. 移除 Hermes A2A peer（尽力，失败不阻断）
     if ($hermesCli) {
         try { & $hermesCli config set a2a_agents.codex "" --force 2>$null; Write-Host "  [2/4] 已移除 Hermes A2A peer codex" -ForegroundColor Green }
@@ -133,15 +164,17 @@ if ($Uninstall) {
 # ---------- 1. 配置 Codex MCP 注册 ----------
 Write-Host "=== [1/4] 配置 Codex MCP 注册 ===" -ForegroundColor Cyan
 if (-not (Test-Path -LiteralPath $codexConfigDir)) { New-Item -ItemType Directory -Path $codexConfigDir -Force | Out-Null }
-if (-not (Test-Path -LiteralPath $codexConfigToml)) { Set-Content -LiteralPath $codexConfigToml -Value "" -Encoding UTF8 }
+if (-not (Test-Path -LiteralPath $codexConfigToml)) { Write-Utf8NoBom -Path $codexConfigToml -Content "" }
 
 $toml = Get-Content -LiteralPath $codexConfigToml -Raw
 if (-not $toml) { $toml = "" }
+$mcpPython = ConvertTo-TomlPath $Python
+$mcpScript = ConvertTo-TomlPath $mcpPy
 $mcpBlock = @"
 
 [mcp_servers.hermes]
-command = "$Python"
-args = ["$mcpPy"]
+command = "$mcpPython"
+args = ["$mcpScript"]
 startup_timeout_sec = 15
 tool_timeout_sec = 300
 enabled = true
@@ -149,15 +182,19 @@ required = false
 enabled_tools = ["call_hermes"]
 "@
 
+# 先备份（Codex 审查 #7：覆盖用户配置前必须可回退）
+Copy-Item -LiteralPath $codexConfigToml -Destination ($codexConfigToml + ".bak") -Force
+
 if ($toml -match '(?ms)^\[mcp_servers\.hermes\]') {
-    # 已存在：替换整段
-    $toml = $toml -replace '(?ms)^\[mcp_servers\.hermes\].*?(?=^\[|\z)', ($mcpBlock + "`n")
-    Write-Host "  [mcp_servers.hermes] 已存在，更新配置" -ForegroundColor Yellow
+    # 已存在：替换整段（用 [regex]::Replace + MatchEvaluator 避免 $ 展开）
+    $re = [regex]'(?ms)^\[mcp_servers\.hermes\].*?(?=^\[|\z)'
+    $toml = $re.Replace($toml, { param($m) $mcpBlock + "`n" }, 1)
+    Write-Host "  [mcp_servers.hermes] 已存在，更新配置（原配置备份为 .bak）" -ForegroundColor Yellow
 } else {
     $toml = $toml.TrimEnd() + "`n" + $mcpBlock + "`n"
     Write-Host "  [mcp_servers.hermes] 新增注册" -ForegroundColor Green
 }
-Set-Content -LiteralPath $codexConfigToml -Value $toml -Encoding UTF8
+Write-Utf8NoBom -Path $codexConfigToml -Content $toml
 Write-Host "  已写入 $codexConfigToml"
 
 # ---------- 2. 配置 Hermes A2A peer ----------
@@ -182,57 +219,65 @@ if ($hermesCli) {
     Write-Host "  未找到 hermes CLI，跳过 Hermes peer 配置（可手动配置）" -ForegroundColor Yellow
 }
 
-# ---------- 3. 开机自启 ----------
-Write-Host "=== [3/4] 开机自启 ===" -ForegroundColor Cyan
+# ---------- 3. 从示例生成真实 start 脚本（先于自启，Codex 审查 #4） ----------
+Write-Host "=== [3/4] 生成真实启动脚本 ===" -ForegroundColor Cyan
+$exampleScript = Join-Path $BridgeDir 'scripts\start_bridge.example.ps1'
+$realScript = Join-Path $BridgeDir 'scripts\start_bridge.ps1'
+if (Test-Path -LiteralPath $exampleScript) {
+    $startContent = Get-Content -LiteralPath $exampleScript -Raw
+    # 桥用 pythonw（后台无窗口）；MCP 用 python.exe 在 [1/4] 已处理
+    $bridgePython = $PythonW
+    if (-not $bridgePython) { $bridgePython = $Python }
+    $startContent = $startContent.Replace('C:\Path\To\pythonw.exe', $bridgePython)
+    $startContent = $startContent.Replace('C:\Path\To\a2a-bridge\codex_a2a_bridge.py', $bridgePy)
+    $startContent = $startContent.Replace('C:\Path\To\Workspace', $Workspace)
+    $startContent = $startContent.Replace('C:\Path\To\Codex\bin', (Split-Path -Parent $codexExe))
+    # 端口替换（Codex 审查 #5）：$port = 9998 -> 实际端口
+    $startContent = $startContent -replace '(?m)^(\$port = )9998$', ('${1}' + $Port)
+    Write-Utf8NoBom -Path $realScript -Content $startContent
+    Write-Host "  已生成真实启动脚本: $realScript" -ForegroundColor Green
+    $startScript = $realScript
+} else {
+    Write-Host "  未找到示例 start 脚本，跳过生成" -ForegroundColor Yellow
+}
+
+# ---------- 4. 开机自启（指向真实脚本） ----------
+Write-Host "=== [4/4] 开机自启 ===" -ForegroundColor Cyan
 $startupDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
 $lnkPath = Join-Path $startupDir 'codex-a2a-bridge.lnk'
-if (-not (Test-Path -LiteralPath $startScript)) {
-    Write-Host "  未找到 start_bridge.example.ps1，跳过自启（手动运行它即可）" -ForegroundColor Yellow
-} else {
-    # 生成一个带参数的快捷方式（自启动跑 start 脚本）
+if ((Test-Path -LiteralPath $startScript) -and -not (Test-Path -LiteralPath $lnkPath)) {
     $ws = New-Object -ComObject WScript.Shell
     $lnk = $ws.CreateShortcut($lnkPath)
     $lnk.TargetPath = "powershell.exe"
     $lnk.Arguments = "-ExecutionPolicy Bypass -File `"$startScript`""
     $lnk.WorkingDirectory = $BridgeDir
-    # 占位符检查：如果 start 脚本仍是示例（未替换），自启会在登录时失败——提示用户
-    if ((Get-Content -LiteralPath $startScript -Raw) -match 'Path\\To') {
-        Write-Host "  ⚠️ start 脚本含占位符，开机自启可能失败——建议先编辑脚本里的路径" -ForegroundColor Yellow
-    }
     $lnk.Save()
-    Write-Host "  已创建开机自启快捷方式: $lnkPath" -ForegroundColor Green
+    Write-Host "  已创建开机自启快捷方式: $lnkPath（指向 $startScript）" -ForegroundColor Green
+} elseif (Test-Path -LiteralPath $lnkPath) {
+    Write-Host "  自启快捷方式已存在，跳过" -ForegroundColor Yellow
+} else {
+    Write-Host "  无真实启动脚本，跳过自启" -ForegroundColor Yellow
 }
 
-# ---------- 4. 启动桥 ----------
-Write-Host "=== [4/4] 启动桥 ===" -ForegroundColor Cyan
-
-# 从示例生成真实 start 脚本（替换占位符为探测到的真实路径）
-$exampleScript = Join-Path $BridgeDir 'scripts\start_bridge.example.ps1'
-$realScript = Join-Path $BridgeDir 'scripts\start_bridge.ps1'
-if (Test-Path -LiteralPath $exampleScript) {
-    $startContent = Get-Content -LiteralPath $exampleScript -Raw
-    $startContent = $startContent.Replace('C:\Path\To\pythonw.exe', $Python)
-    $startContent = $startContent.Replace('C:\Path\To\a2a-bridge\codex_a2a_bridge.py', $bridgePy)
-    $startContent = $startContent.Replace('C:\Path\To\Workspace', $Workspace)
-    $startContent = $startContent.Replace('C:\Path\To\Codex\bin', (Split-Path -Parent $codexExe))
-    Set-Content -LiteralPath $realScript -Value $startContent -Encoding UTF8
-    Write-Host "  已生成真实启动脚本: $realScript" -ForegroundColor Green
-    $startScript = $realScript
-}
-
+# ---------- 5. 启动桥 ----------
+Write-Host "=== [5/5] 启动桥 ===" -ForegroundColor Cyan
 if (Test-Path -LiteralPath $startScript) {
     & powershell.exe -ExecutionPolicy Bypass -File $startScript
     Start-Sleep -Seconds 3
+    $bridgeUp = $false
     try {
         $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 5
         if ($health.service -eq 'codex-a2a-bridge') {
             Write-Host "  桥已启动 ✅  http://127.0.0.1:$Port/ui" -ForegroundColor Green
+            $bridgeUp = $true
         }
     } catch {
-        Write-Host "  桥启动失败（手动运行 start_bridge.example.ps1 排查）" -ForegroundColor Yellow
+        Write-Host "  桥启动失败（手动运行 start_bridge.ps1 排查）" -ForegroundColor Yellow
     }
+    if (-not $bridgeUp) { exit 1 }
 } else {
     Write-Host "  无 start 脚本，跳过启动（手动运行桥）" -ForegroundColor Yellow
+    exit 1
 }
 
 Write-Host ""
