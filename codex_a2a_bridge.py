@@ -587,7 +587,8 @@ $("dlg-ok").onclick = async () => {
 };
 async function doDeleteByFilter(isNoise) {
   const headers = {};
-  if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+  const tok = window.__TOKEN || TOKEN;
+  if (tok) headers["Authorization"] = "Bearer " + tok;
   const targets = allTasks.filter(t => isNoise ? t.noise : (t.contextId || "") === currentCtx);
   let okCount = 0;
   for (const t of targets) {
@@ -601,13 +602,25 @@ async function doDeleteByFilter(isNoise) {
 }
 async function doDeleteOne(id) {
   const headers = {};
-  if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+  const tok = window.__TOKEN || TOKEN;
+  if (tok) headers["Authorization"] = "Bearer " + tok;
   try {
     const r = await fetch("/tasks/" + encodeURIComponent(id), { method: "DELETE", headers });
     $("conn").textContent = r.ok ? "已删除" : "删除失败";
   } catch (e) { $("conn").textContent = "删除失败: " + e; }
   refreshTasks();
 }
+
+// 启动时若 TOKEN 为空，自动向后端要 token（供 DELETE 鉴权）
+(async function () {
+  if (!TOKEN) {
+    try {
+      const r = await fetch("/monitor-token");
+      const d = await r.json();
+      if (d && d.token) window.__TOKEN = d.token;
+    } catch (e) { console.warn("获取监控 token 失败", e); }
+  }
+})();
 
 // 定时刷新
 setInterval(refreshTasks, 3000);
@@ -1291,8 +1304,8 @@ def parse_codex_conversation(session_id: str, max_messages: int = 200) -> list[d
                     detail = payload.get("arguments") or payload.get("output") or payload.get("aggregated_output") or ""
                     if isinstance(detail, (dict, list)):
                         detail = json.dumps(detail, ensure_ascii=False)
-                    text = f"调用 {name}" + (f" | {str(detail)[:300]}" if detail else "")
-                    messages.append({"role": "tool", "ts": ts, "text": text[:2000]})
+                    text = f"调用 {name}" + (f" | {str(detail)[:2000]}" if detail else "")
+                    messages.append({"role": "tool", "ts": ts, "text": text[:20000]})
                     continue
                 if role not in ("user", "assistant"):
                     continue
@@ -1304,7 +1317,7 @@ def parse_codex_conversation(session_id: str, max_messages: int = 200) -> list[d
                     if ctype in ("input_text", "output_text"):
                         text = content.get("text", "")
                     elif ctype in ("tool_use", "tool_result"):
-                        text = json.dumps(content, ensure_ascii=False)[:500]
+                        text = json.dumps(content, ensure_ascii=False)[:2000]
                     if not text or not text.strip():
                         continue
                     t = text.strip()
@@ -1326,7 +1339,7 @@ def parse_codex_conversation(session_id: str, max_messages: int = 200) -> list[d
                     messages.append({
                         "role": role,
                         "ts": ts,
-                        "text": t[:2000],
+                        "text": t[:20000],
                     })
     except OSError:
         return []
@@ -2546,7 +2559,7 @@ class A2AHandler(BaseHTTPRequestHandler):
     # state. They are intentionally exempt from Bearer auth because the HTML
     # page and its JS polling cannot attach an Authorization header; they
     # expose no secrets beyond what the local operator already has.
-    _UNPROTECTED_GET = {"/ui", "/health", "/tasks"}
+    _UNPROTECTED_GET = {"/ui", "/health", "/tasks", "/monitor-token"}
 
     def _serve_monitor_ui(self, token: str = "") -> None:
         html = MONITOR_UI_HTML
@@ -2673,6 +2686,16 @@ class A2AHandler(BaseHTTPRequestHandler):
             return
         if path == "/metrics":
             self._send_json(self.server.bridge.metrics())
+            return
+        if path == "/monitor-token":
+            # 监控页自动获取 token（仅限回环 Host，防 DNS-rebinding）。
+            # 返回桥的主 token，供页面 DELETE 鉴权。
+            host = (self.headers.get("Host") or "").strip()
+            if not _ALLOWED_CARD_HOST_RE.match(host):
+                self._send_json({"error": "bad host"}, 400)
+                return
+            tok = getattr(self.server.bridge, "token", None) or ""
+            self._send_json({"token": tok})
             return
         if path == "/ui":
             # 支持 ?token= 注入：open_preview 打开时带上 token，
