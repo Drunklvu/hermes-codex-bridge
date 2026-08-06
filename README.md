@@ -125,6 +125,18 @@ Two components in one repo:
 - [Codex CLI](https://github.com/openai/codex) installed and authenticated (bridge only)
 - Hermes Agent with the A2A inbound platform enabled (gateway `platforms.a2a` listening on 127.0.0.1)
 
+## Quick install (Windows)
+
+```powershell
+git clone https://github.com/Drunklvu/hermes-codex-bridge.git
+cd hermes-codex-bridge
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1
+```
+
+The installer auto-detects Python / Codex / Hermes, registers the MCP server in
+`~/.codex/config.toml`, registers the `codex` peer in Hermes, creates a startup
+shortcut, and starts the bridge. Uninstall with `-Uninstall`; dry-run with `-DryRun`.
+
 ## Setup
 
 1. **Hermes side** — enable the A2A inbound platform in `config.yaml` so the Hermes gateway listens on `127.0.0.1:9900` (one port per profile/instance you want to reach):

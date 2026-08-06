@@ -117,6 +117,17 @@ Codex 与 Hermes Agent 之间的**双向本地协作**桥，基于
 - [Codex CLI](https://github.com/openai/codex) 已安装并登录（仅桥需要）
 - Hermes Agent 已启用 A2A 入站平台（gateway 的 `platforms.a2a` 监听 127.0.0.1）
 
+## 一键安装（Windows）
+
+```powershell
+git clone https://github.com/Drunklvu/hermes-codex-bridge.git
+cd hermes-codex-bridge
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1
+```
+
+安装器自动探测 Python / Codex / Hermes，注册 MCP server（`~/.codex/config.toml`）、
+注册 Hermes 的 codex peer、创建开机自启、启动桥。卸载用 `-Uninstall`，只探测用 `-DryRun`。
+
 ## 安装
 
 1. **Hermes 侧** — 在 `config.yaml` 里启用 A2A 入站平台，让 Hermes gateway 监听 `127.0.0.1:9900`（每个要触达的 profile/实例一个端口）：
