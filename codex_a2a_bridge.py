@@ -441,7 +441,11 @@ async function refreshTasks() {
     allTasks = d.tasks || [];
     let tasks = allTasks;
     if (filterState) tasks = tasks.filter(t => t.state === filterState);
-    if (searchQ) tasks = tasks.filter(t => ((t.contextId||"")+" "+(t.summary||t.message_summary||"")+" "+(t.id||"")).toLowerCase().includes(searchQ));
+    if (searchQ) tasks = tasks.filter(t => {
+      const searchable = (t.contextId||"") + " " + (t.summary||t.message_summary||"") + " " + (t.id||"")
+        + (t.noise ? " 测试噪音 noise" : "");
+      return searchable.toLowerCase().includes(searchQ);
+    });
     refreshStats(allTasks);
     const box = $("tasklist");
     box.replaceChildren(el("div", "refresh", "对话列表（点击查看，同对话自动分组）"));
