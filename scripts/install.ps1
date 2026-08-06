@@ -208,13 +208,42 @@ if ($hermesCli) {
     if (Test-Path -LiteralPath $tokenFile) { $token = (Get-Content -LiteralPath $tokenFile -Raw).Trim() }
     if (-not $token) { $token = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N'); Set-Content -LiteralPath $tokenFile -Value $token -Encoding ASCII -NoNewline }
 
-    # 用 hermes config set 写嵌套 key（避免手改 config.yaml）
-    & $hermesCli config set a2a_agents.codex.url "http://127.0.0.1:$Port" --force 2>$null
-    & $hermesCli config set a2a_agents.codex.timeout 600 --force 2>$null
-    & $hermesCli config set a2a_agents.codex.capabilities '["coding"]' --force 2>$null
-    & $hermesCli config set a2a_agents.codex.auth.type bearer --force 2>$null
-    & $hermesCli config set a2a_agents.codex.auth.token $token --force 2>$null
-    Write-Host "  已注册 a2a_agents.codex -> http://127.0.0.1:$Port（token 在 $tokenFile）" -ForegroundColor Green
+    # 幂等检查：先读现有 peer，url/token 一致则跳过（不重复配置已配置好的环境）
+    $existingUrl = ""
+    $existingToken = ""
+    try {
+        $existingUrl = (& $hermesCli config get a2a_agents.codex.url 2>$null | Out-String).Trim()
+        $existingToken = (& $hermesCli config get a2a_agents.codex.auth.token 2>$null | Out-String).Trim()
+    } catch {}
+    if ($existingUrl -eq "http://127.0.0.1:$Port" -and $existingToken -eq $token) {
+        Write-Host "  a2a_agents.codex 已配置（url/token 一致），跳过写入" -ForegroundColor Yellow
+    } else {
+        # 标量字段用 hermes config set
+        & $hermesCli config set a2a_agents.codex.url "http://127.0.0.1:$Port" --force 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "设置 a2a_agents.codex.url 失败" }
+        & $hermesCli config set a2a_agents.codex.timeout 600 --force 2>$null
+        & $hermesCli config set a2a_agents.codex.auth.type bearer --force 2>$null
+        & $hermesCli config set a2a_agents.codex.auth.token $token --force 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "设置 a2a_agents.codex.auth.token 失败" }
+        # capabilities 是数组：hermes config set 会存成字符串（已知坑），
+        # 用 Python + PyYAML 直写 config.yaml 保证真列表
+        $pyScript = @"
+import yaml, sys
+p = r"$env:USERPROFILE\AppData\Local\hermes\config.yaml"
+with open(p, encoding='utf-8') as f:
+    cfg = yaml.safe_load(f)
+codex = cfg.setdefault('a2a_agents', {}).setdefault('codex', {})
+codex['capabilities'] = ['coding']
+with open(p, 'w', encoding='utf-8') as f:
+    yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+print('capabilities set')
+"@
+        $pyOut = (& $Python -c $pyScript 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  ⚠️ capabilities 写入失败（$pyOut）——请手动将 a2a_agents.codex.capabilities 设为列表" -ForegroundColor Yellow
+        }
+        Write-Host "  已注册 a2a_agents.codex -> http://127.0.0.1:$Port（token 在 $tokenFile）" -ForegroundColor Green
+    }
 } else {
     Write-Host "  未找到 hermes CLI，跳过 Hermes peer 配置（可手动配置）" -ForegroundColor Yellow
 }
