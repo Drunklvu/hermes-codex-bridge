@@ -275,6 +275,21 @@ class ReviewFixTests(unittest.TestCase):
         self.assertTrue(any("playwright.browser_navigate" in t for t in texts), texts)
         self.assertTrue(any("read_file" in t for t in texts), texts)
 
+    def test_progress_event_long_assistant_not_truncated(self):
+        """memory 源助手长回复（>240 字符）不应截断（回归：2026-08-06 二次修复）。"""
+        bridge = bridge_module.CodexBridge(
+            codex=None, workspace=Path(self.temp.name), state_dir=Path(self.temp.name),
+            model="", sync_wait=1, codex_timeout=5, max_concurrent=1,
+        )
+        bridge.store = self.store
+        # 用 setUp 里已创建的 t-review 任务
+        long_text = "这是很长的助手回复。" * 100  # ~1000 字符
+        bridge._record_progress_event("t-review", {"type": "agent_message", "text": long_text})
+        events, _ = self.store.events_since("t-review", after=-1)
+        msgs = [e for e in events if e["type"] == "message" and e["role"] == "assistant"]
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(len(msgs[0]["text"]), len(long_text), "长回复不应被截断到 240")
+
 
     def test_update_preserves_created_at(self):
         # 终态更新只带 status/artifacts 时，不得丢失原任务的 created_at
@@ -396,9 +411,9 @@ class ConversationAndDeleteTests(unittest.TestCase):
 
     def test_extract_summary(self):
         # 带桥前缀的 prompt 提取实际内容
-        p = "You are Codex receiving a task.\n\nHermes task:\n帮我找五张示例图片放在工作目录"
+        p = "You are Codex receiving a task.\n\nHermes task:\n写一个函数计算斐波那契数列"
         s = bridge_module.CodexBridge._extract_summary(p)
-        self.assertTrue(s.startswith("帮我找五张"))
+        self.assertTrue(s.startswith("写一个函数"))
         self.assertNotIn("Hermes task", s)
         # 截断
         long_p = "x" * 100
@@ -427,6 +442,38 @@ class ConversationAndDeleteTests(unittest.TestCase):
         self.assertIsNone(self.store.get("t-conv"))
         self.assertIsNone(self.store.remove("t-conv"))
 
+    def test_parse_long_reply_not_truncated(self):
+        """助手最终回复超过 2000 字符不应被截断（回归：2026-08-06 修复）。"""
+        import tempfile, json as _json, uuid
+        long_text = "长回复内容。" * 600  # ~3600 字符
+        sid = str(uuid.uuid4())
+        with tempfile.TemporaryDirectory() as td:
+            sess = Path(td) / ("rollout-2026-08-06T12-00-00-" + sid + ".jsonl")
+            record = {
+                "type": "response_item",
+                "timestamp": "2026-08-06T12:00:00Z",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": long_text}],
+                },
+            }
+            sess.write_text(_json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+            # monkeypatch 会话根目录 + 清索引缓存
+            orig_root = bridge_module._codex_sessions_root
+            orig_index = bridge_module.session_index
+            bridge_module._codex_sessions_root = lambda: Path(td)
+            bridge_module.session_index = lambda: {}
+            try:
+                msgs = bridge_module.parse_codex_conversation(sid)
+            finally:
+                bridge_module._codex_sessions_root = orig_root
+                bridge_module.session_index = orig_index
+                bridge_module._session_file_cache.clear()
+            self.assertEqual(len(msgs), 1)
+            self.assertEqual(msgs[0]["role"], "assistant")
+            self.assertEqual(len(msgs[0]["text"]), len(long_text), "长回复不应被截断")
+            self.assertIn("长回复内容。", msgs[0]["text"][:50])
 
 class DeleteEndpointTests(unittest.TestCase):
     """DELETE /tasks/<id> 的认证、状态校验与行为。"""
