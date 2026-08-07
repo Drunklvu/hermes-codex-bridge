@@ -1925,17 +1925,17 @@ class CodexBridge:
 
         Codex's ``--json`` output emits ``item.completed`` entries with item
         types like ``agent_message`` (assistant text) and ``function_call`` /
-        ``tool_call`` (tool invocations). We record a short, truncated summary
-        so the monitoring UI can show live progress without shipping raw
-        payloads to the page.
+        ``tool_call`` (tool invocations). We record a progress event; assistant
+        text is kept up to 20000 chars (long final replies are not truncated),
+        tool arguments are summarized.
         """
         try:
             item_type = item.get("type", "item")
             text = item.get("text")
             if isinstance(text, str) and text.strip():
                 summary = text.strip().replace("\r", " ").replace("\n", " ")
-                if len(summary) > 240:
-                    summary = summary[:237] + "..."
+                if len(summary) > 20000:
+                    summary = summary[:19997] + "..."
                 self.store.append_event(task_id, {
                     "type": "message",
                     "role": "assistant",
