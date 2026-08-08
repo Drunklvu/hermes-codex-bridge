@@ -144,6 +144,17 @@ Two components in one repo:
 - [Codex CLI](https://github.com/openai/codex) installed and authenticated (bridge only)
 - Hermes Agent with the A2A inbound platform enabled (gateway `platforms.a2a` listening on 127.0.0.1)
 
+## Platform support
+
+| Platform | Status |
+|----------|--------|
+| **Windows** | ✅ First-class (install.ps1, start_bridge.ps1, PowerShell scripts) |
+| **Linux / macOS** | ⚠️ Best-effort — bash launchers provided (`scripts/start_bridge.example.sh`, `start_a2a_sidecar.sh`), the bridge itself is pure stdlib and cross-platform by design |
+
+> **Honest caveat**: the bash scripts were ported from the PowerShell versions but
+> have **not been tested on real macOS/Linux** yet (the maintainer's environment is
+> Windows). They are provided as a starting point — corrections and PRs welcome.
+
 ## Quick install (Windows)
 
 ```powershell

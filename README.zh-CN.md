@@ -136,6 +136,15 @@ Codex 与 Hermes Agent 之间的**双向本地协作**桥，基于
 - [Codex CLI](https://github.com/openai/codex) 已安装并登录（仅桥需要）
 - Hermes Agent 已启用 A2A 入站平台（gateway 的 `platforms.a2a` 监听 127.0.0.1）
 
+## 平台支持
+
+| 平台 | 状态 |
+|------|------|
+| **Windows** | ✅ 一等公民（install.ps1、start_bridge.ps1、PowerShell 脚本）|
+| **Linux / macOS** | ⚠️ 尽力支持——提供 bash 启动脚本（`scripts/start_bridge.example.sh`、`start_a2a_sidecar.sh`），桥本身纯 stdlib 天然跨平台 |
+
+> **诚实声明**：bash 脚本是从 PowerShell 移植的，但**尚未在真实 macOS/Linux 上实测**（维护者环境是 Windows）。作为起点提供——欢迎修正和 PR。
+
 ## 一键安装（Windows）
 
 ```powershell
