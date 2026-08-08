@@ -331,7 +331,9 @@ def build_app(task_service: Any, host: str = "127.0.0.1", port: int = 10000,
             agent_card = _signer(agent_card)
             logger.info("AgentCard 已签名（%s）", sign_key)
         except Exception as e:
-            logger.error("AgentCard 签名失败: %s（忽略，继续未签名启动）", e)
+            # fail-closed：显式要求签名却失败 → 拒绝启动（安全功能不能"尽力而为"）
+            raise SystemExit(f"AgentCard 签名失败: {e}（--sign-key 显式要求签名，拒绝未签名启动；"
+                             f"如确实不需要签名请去掉 --sign-key）") from e
 
     class _ExtendedHandler(DefaultRequestHandler):
         """覆盖 on_get_extended_agent_card：返回扩展卡片（含运行时状态）。"""
