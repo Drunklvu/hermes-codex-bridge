@@ -38,6 +38,7 @@ Codex 与 Hermes Agent 之间的**双向本地协作**桥，基于
 |---|---|---|
 | **Codex → Hermes** | `hermes_mcp_server.py` | 纯标准库的 stdio **MCP 服务器**，暴露一个 `call_hermes` 工具：向本地 Hermes 发送任务（A2A `message/send`）、轮询 `tasks/get`、把 Hermes 的最终回复作为 MCP 文本结果返回。 |
 | **Hermes → Codex** | `codex_a2a_bridge.py` | 本地回环 **HTTP 桥**，向 Hermes 暴露 A2A `message/send` / `tasks/*`；每个任务启动原生 Codex CLI（`codex exec`）子进程，带并发上限、token 鉴权、心跳与崩溃恢复。 |
+| **标准 A2A 接入**（可选）| `a2a_sidecar.py` | 可选的 **A2A 1.0 网关**（`:10000`），面向第三方标准 agent：JSON-RPC/gRPC 双传输、Bearer 鉴权、租户隔离、推送通知、持久化、AgentCard 签名和 OpenTelemetry 追踪——底层复用同一个桥。 |
 
 ```
 ┌────────────┐   stdio MCP    ┌──────────────────┐   A2A JSON-RPC   ┌──────────────────┐
@@ -49,6 +50,12 @@ Codex 与 Hermes Agent 之间的**双向本地协作**桥，基于
 │  Hermes    │ ◄────────────► │ codex_a2a_bridge │ ◄─────────────────────┘
 │ (A2A peer) │   message/send │  (本仓库)         │   codex exec (子进程)
 └────────────┘                └──────────────────┘
+       ▲
+       │ A2A 1.0（可选）
+┌──────────────────┐
+│  a2a_sidecar     │  ← 第三方标准 A2A agent
+│  (:10000, SDK)   │
+└──────────────────┘
 ```
 
 ## 特性
@@ -73,6 +80,18 @@ Codex 与 Hermes Agent 之间的**双向本地协作**桥，基于
 - 按角色（用户/助手/工具/系统）的时间轴对话，本地时间显示。
 - 状态过滤 + 关键词搜索；单条/整组删除（Bearer token 保护的 `<dialog>` 确认框）。
 - 孤儿过滤：Codex 会话文件已不存在的任务自动隐藏。
+
+**A2A SDK sidecar（`a2a_sidecar.py`，可选）** —— 面向第三方 agent 的标准 A2A 1.0 接入
+- 标准 A2A 1.0 协议：`SendMessage` / `GetTask` / `ListTasks` / `CancelTask` + AgentCard 发现（`/.well-known/agent-card.json`）。
+- **双传输**：HTTP JSON-RPC（`:10000`）和 gRPC（`--grpc-port`，带 Bearer 鉴权拦截器）。
+- **安全**：默认只绑 loopback；`--require-token` 强制所有端点 Bearer 鉴权（含 gRPC）；非 loopback 绑定必须鉴权且禁止复用桥管理 token。
+- **租户隔离**（`--tenant-mode`）：无 tenant 请求拒绝；跨租户取消拒绝。
+- **持久化**（`--db`）：SQLite 任务存储，重启不丢。
+- **推送通知**（`--push`）：任务状态变化主动推给客户端配置的 webhook。
+- **AgentCard 签名**（`--sign-key`）：JWT 签名卡片，客户端可验证真实性。
+- **OpenTelemetry 追踪**（`--tracing`）：SDK span 输出到控制台（无需外部 collector）。
+- **SDK 更新检查**（`--check-update`）：查 PyPI 最新 `a2a-sdk`。
+- 进程隔离：sidecar 崩溃不影响桥 `:9998`；零依赖降级（未装 `a2a-sdk` 时明确报错，桥照常工作）。
 
 **反向链路上报（Codex → Hermes 可见性）**
 - 桥的 `POST /inbound/events`（独立 `--inbound-token`）：MCP server 上报 started/accepted/state/finished 事件，反向调用出现在监控页。
@@ -251,7 +270,7 @@ curl -s http://127.0.0.1:9998/health
 ## 测试
 
 ```bash
-# 完整单元套件（44 项，无需 Hermes）
+# 完整单元套件（128 项，无需 Hermes）
 python -m unittest discover -s tests -p "test_*.py" -v
 
 # MCP 协议冒烟测试（initialize → tools/list → call_hermes），需要本机

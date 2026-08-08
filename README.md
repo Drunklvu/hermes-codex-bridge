@@ -46,6 +46,7 @@ Two components in one repo:
 |---|---|---|
 | **Codex → Hermes** | `hermes_mcp_server.py` | A pure-stdlib stdio **MCP server** exposing one tool, `call_hermes`, that sends a task to a local Hermes agent (A2A `message/send`), polls `tasks/get`, and returns Hermes's final reply as an MCP text result. |
 | **Hermes → Codex** | `codex_a2a_bridge.py` | A localhost **HTTP bridge** exposing A2A `message/send` / `tasks/*` to Hermes; each task spawns the native Codex CLI (`codex exec`) with a bounded concurrency, token auth, heartbeat, and crash recovery. |
+| **Standard A2A access** (optional) | `a2a_sidecar.py` | An optional **A2A 1.0 gateway** (`:10000`) for third-party standard agents: JSON-RPC/gRPC transports, Bearer auth, tenant isolation, push notifications, persistence, AgentCard signing and OpenTelemetry tracing — all talking to the same bridge under the hood. |
 
 ```
 ┌────────────┐   stdio MCP    ┌──────────────────┐   A2A JSON-RPC   ┌──────────────────┐
@@ -57,6 +58,12 @@ Two components in one repo:
 │  Hermes    │ ◄────────────► │ codex_a2a_bridge │ ◄─────────────────────┘
 │ (A2A peer) │   message/send │  (this repo)     │   codex exec (subprocess)
 └────────────┘                └──────────────────┘
+       ▲
+       │ A2A 1.0 (optional)
+┌──────────────────┐
+│  a2a_sidecar     │  ← third-party standard A2A agents
+│  (:10000, SDK)   │
+└──────────────────┘
 ```
 
 ## Features
@@ -81,6 +88,18 @@ Two components in one repo:
 - Conversation timeline per role (user / assistant / tool / system), local-time display.
 - Filter by state + keyword search; delete single call or whole conversation via a styled `<dialog>` confirm (Bearer-token protected DELETE).
 - Orphan filtering: tasks whose Codex session file no longer exists are hidden automatically.
+
+**A2A SDK sidecar (`a2a_sidecar.py`, optional)** — standard A2A 1.0 access for third-party agents
+- Standard A2A 1.0 protocol: `SendMessage` / `GetTask` / `ListTasks` / `CancelTask` + AgentCard discovery (`/.well-known/agent-card.json`).
+- **Two transports**: JSON-RPC over HTTP (`:10000`) and gRPC (`--grpc-port`, with Bearer auth interceptor).
+- **Security**: loopback-only by default; `--require-token` forces Bearer auth on every endpoint (incl. gRPC); non-loopback binding requires auth and forbids reusing the bridge admin token.
+- **Tenant isolation** (`--tenant-mode`): requests without a tenant are rejected; cross-tenant cancel is refused.
+- **Persistence** (`--db`): SQLite-backed task store, survives restarts.
+- **Push notifications** (`--push`): task status changes pushed to client-configured webhooks.
+- **AgentCard signing** (`--sign-key`): JWT-signed AgentCard so clients can verify authenticity.
+- **OpenTelemetry tracing** (`--tracing`): SDK spans to console (no external collector needed).
+- **SDK update check** (`--check-update`): queries PyPI for the latest `a2a-sdk`.
+- Process-isolated: sidecar crash never affects the bridge `:9998`; zero-dependency fallback (no `a2a-sdk` installed → clear error, bridge still works).
 
 **Reverse-link reporting (Codex → Hermes visibility)**
 - `POST /inbound/events` on the bridge (separate `--inbound-token`): the MCP server reports started/accepted/state/finished events so reverse calls show up on the dashboard.
@@ -263,7 +282,7 @@ The full protocol walkthrough (initialize → tools/list → real `call_hermes`)
 ## Testing
 
 ```bash
-# Full unit suite (113 tests, no Hermes needed)
+# Full unit suite (128 tests, no Hermes needed)
 python -m unittest discover -s tests -p "test_*.py" -v
 
 # MCP protocol smoke test (initialize → tools/list → tools/call), needs a live
