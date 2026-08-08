@@ -92,22 +92,6 @@ logger = logging.getLogger("a2a-sidecar")
 # AgentExecutor——桥接内部 TaskService（仅 SDK 可用时定义）
 # ---------------------------------------------------------------------------
 
-def _task_result(task_id: str, msg) -> Task:
-    """构造一个已完成的 Task（幂等命中时复用）。"""
-    from a2a.types import Task, TaskStatus, TaskState, Message, Part, TextPart, Artifact
-    return Task(
-        id=task_id,
-        status=TaskStatus(state=TaskState.COMPLETED),
-        artifacts=[
-            Artifact(
-                artifact_id=f"artifact-{task_id[:8]}",
-                name="idempotent-replay",
-                parts=[Part(text="Reused existing task (idempotent replay).")],
-            )
-        ],
-    )
-
-
 class BridgeAgentExecutor(AgentExecutor):  # type: ignore[misc]
     """把标准 A2A 请求翻译成内部 TaskService 调用（经 HTTP 或直连）。"""
 
@@ -119,8 +103,6 @@ class BridgeAgentExecutor(AgentExecutor):  # type: ignore[misc]
         self._expose_reasoning = expose_reasoning
         # tenant 前缀 -> context 命名空间（多租户隔离）
         self._tenant_ctx: dict[str, set[str]] = {}
-        # message_id -> task_id 幂等映射（同 message_id 不重复提交）
-        self._msg_to_task: dict[str, str] = {}
         # SDK task_id -> bridge task_id（取消/查询必须用桥 ID）
         self._task_to_bridge: dict[str, str] = {}
         # task_id -> tenant（租户隔离：跨租户取消/查询拒绝）
@@ -135,14 +117,7 @@ class BridgeAgentExecutor(AgentExecutor):  # type: ignore[misc]
         if not msg or not task_id:
             return
 
-        # 0. 幂等：同 message_id 复用已有任务（不重复提交）
-        msg_id = msg.message_id or ""
-        if msg_id:
-            with self._idem_lock:
-                if msg_id in self._msg_to_task:
-                    return _task_result(self._msg_to_task[msg_id], msg)
-
-        # 0.5 租户隔离（tenant_mode 开启时）：记录 tenant 归属（不改 context_id，
+        # 0. 租户隔离（tenant_mode 开启时）：记录 tenant 归属（不改 context_id，
         #    避免破坏 SDK TaskManager 内部一致性）
         tenant = getattr(context, "tenant", "") or ""
         if self._tenant_mode:
@@ -168,9 +143,6 @@ class BridgeAgentExecutor(AgentExecutor):  # type: ignore[misc]
         self._running.add(task_id)
         with self._idem_lock:
             self._task_to_bridge[task_id] = bridge_task_id or task_id
-        if msg_id:
-            with self._idem_lock:
-                self._msg_to_task[msg_id] = bridge_task_id or task_id
 
         # 2. 先 enqueue Task（SDK 要求：Task 必须先于 TaskStatusUpdateEvent）
         await event_queue.enqueue_event(Task(
@@ -236,8 +208,9 @@ class BridgeAgentExecutor(AgentExecutor):  # type: ignore[misc]
                     await updater.cancel()
                 return
             poll += 1
-        # 超时兜底（#4）：不伪造取消，记录真实状态
-        await updater.cancel()  # 超时兜底（任务可能仍在桥端运行）
+        # 超时兜底（#4）：不伪造取消——任务可能仍在桥端运行，
+        # SDK 侧标记为失败（真实超时），由桥端心跳/清理机制接管
+        await updater.failed()
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         task_id = context.task_id
@@ -245,7 +218,8 @@ class BridgeAgentExecutor(AgentExecutor):  # type: ignore[misc]
         if self._tenant_mode:
             req_tenant = getattr(context, "tenant", "") or ""
             owner = self._task_to_tenant.get(task_id or "", "")
-            if not req_tenant or (owner and owner != req_tenant):
+            # 拒绝条件：无 tenant、归属未知（可能非本进程创建）、归属不匹配
+            if not req_tenant or owner != req_tenant:
                 return  # 无 tenant 或非归属者：静默拒绝
         if task_id in self._running:
             self._running.remove(task_id)
@@ -458,11 +432,15 @@ def start_grpc_server(handler: Any, port: int, require_token: bool = False,
     grpc_handler = GrpcHandler(handler)
 
     async def _serve() -> None:
+        # 拦截器仅在 grpcio 可用时定义；require_token 但无拦截器 = 拒绝启动（防裸奔）
+        if require_token and token and _grpc_aio is None:
+            print("[a2a-sidecar] 错误: --require-token 需要 grpcio 才能启用 gRPC 鉴权", file=sys.stderr)
+            return
         interceptors = [_GrpcAuthInterceptor(token)] if require_token and token else None
         server = _grpc_aio.server(interceptors=interceptors)
         add_A2AServiceServicer_to_server(grpc_handler, server)
         # 默认 loopback；远程部署（require_token）时绑所有接口
-        bind_addr = "[::]:{port}" if require_token else f"127.0.0.1:{port}"
+        bind_addr = f"0.0.0.0:{port}" if require_token else f"127.0.0.1:{port}"
         server.add_insecure_port(bind_addr)
         await server.start()
         print(f"[a2a-sidecar] gRPC server 已启动: {bind_addr}", flush=True)
@@ -601,15 +579,25 @@ def main() -> int:
 
     # 阶段 3：真实 HTTP TaskService（调桥 :9998 的 internal/* 端点）
     from http_task_service import HttpTaskService
-    # token 优先 --token，否则从桥 state 目录自动读（同机部署）
+    # token 优先 --token，否则从桥 state 目录自动读（同机部署，探测多个常见位置）
     token = args.token
     if not token:
         import os as _os
-        state_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", ".codex-a2a")
-        token_file = _os.path.join(state_dir, "bridge.token")
-        if _os.path.exists(token_file):
-            token = open(token_file, encoding="utf-8").read().strip()
-            logger.info("从 %s 读取桥 token", token_file)
+        _here = _os.path.dirname(_os.path.abspath(__file__))
+        _candidates = [
+            _os.path.join(_here, "..", ".codex-a2a"),      # 发布版仓库相邻
+            _os.path.join(_here, "..", "tools", ".codex-a2a"),  # 本地开发布局
+            _os.path.join(_here, ".codex-a2a"),            # 仓库内
+        ]
+        for _sd in _candidates:
+            _tf = _os.path.join(_sd, "bridge.token")
+            if _os.path.exists(_tf):
+                token = open(_tf, encoding="utf-8").read().strip()
+                logger.info("从 %s 读取桥 token", _tf)
+                break
+        if not token:
+            logger.warning("未找到桥 token（探测 %d 个位置）——internal 调用将 401。"
+                           "请用 --token 显式指定桥 Bearer token", len(_candidates))
     service = HttpTaskService(
         bridge_url=args.bridge_url,
         token=token,
