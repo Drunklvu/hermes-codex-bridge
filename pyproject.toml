@@ -34,3 +34,18 @@ py-modules = [
     "http_task_service",
     "a2a_sidecar",
 ]
+
+[tool.coverage.run]
+source = ["."]
+branch = true
+omit = [
+    "tests/*",
+    "monitor_ui.html",
+    "a2a_sidecar.py",
+    "http_task_service.py",
+    "a2a_sdk_contract_check.py",
+]
+
+[tool.coverage.report]
+fail_under = 62
+show_missing = true
