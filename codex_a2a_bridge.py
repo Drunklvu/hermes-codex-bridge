@@ -304,6 +304,7 @@ body {
   background: rgba(255, 255, 255, .04);
   border: 1px solid rgba(255, 255, 255, .06);
   padding: 1px 8px; border-radius: 999px;
+  white-space: nowrap; flex-shrink: 0;   /* 防 flex 压缩换行（竖排修复）*/
 }
 
 /* 方向芯片（胶囊） */
@@ -2097,6 +2098,19 @@ class TaskStore:
             self._persist_locked()
             return event
 
+    @staticmethod
+    def _can_transition(cur_state: str | None, new_state: str) -> bool:
+        """状态流转合法性校验（显式规则，替代散落的隐式特判）。
+
+        规则：
+        - 无当前状态（新任务）→ 任何新状态都合法
+        - 终态 → WORKING：拒绝（已完成/失败/取消的任务不允许复活为运行中）
+        - 其他组合（含终态之间互转、WORKING 更新）→ 允许（保持历史行为）
+        """
+        if not cur_state:
+            return True
+        return not (cur_state in TERMINAL_STATES and new_state == "TASK_STATE_WORKING")
+
     def update(
         self,
         task_id: str,
@@ -2371,9 +2385,9 @@ class TaskStore:
                 self.add(task)
             else:
                 task = existing
-                # 更新字段（不覆盖已有终态为 WORKING）
+                # 更新字段（不覆盖已有终态为 WORKING，显式流转规则）
                 cur_state = (task.get("status") or {}).get("state")
-                if new_state and not (cur_state in TERMINAL_STATES and new_state == "TASK_STATE_WORKING"):
+                if new_state and self._can_transition(cur_state, new_state):
                     task["status"] = {"state": new_state, "timestamp": event.get("observed_at") or utc_timestamp()}
                 if event.get("context_id"):
                     task["contextId"] = event["context_id"]
@@ -2494,6 +2508,7 @@ class CodexBridge:
         sync_wait: int,
         codex_timeout: int,
         max_concurrent: int,
+        max_tasks: int = 100,
         token: str | None = None,
         hide_orphan_tasks: bool = True,
         inbound_token: str | None = None,
@@ -2512,7 +2527,7 @@ class CodexBridge:
         self.inbound_token = inbound_token
         self.started_at = time.time()
         self.semaphore = threading.BoundedSemaphore(max_concurrent)
-        self.store = TaskStore(self.state_dir / "tasks.json")
+        self.store = TaskStore(self.state_dir / "tasks.json", max_tasks=max_tasks)
         self.sessions = SessionStore(self.state_dir / "sessions.json")
         # 启动时清理卡死的 inbound 任务（MCP 崩溃遗留的 WORKING）
         try:
@@ -2558,6 +2573,34 @@ class CodexBridge:
                     "role": "assistant",
                     "ts": utc_timestamp(),
                     "text": summary,
+                })
+                return
+            # agent_reasoning（Codex 思考块）：存成 reasoning 事件（思考级流式）
+            # 注意：部分模型 reasoning 字段叫 "reasoning"，部分叫 "summary"
+            if item_type == "agent_reasoning":
+                reason_text = (
+                    item.get("reasoning")
+                    or item.get("summary")
+                    or item.get("text")
+                    or ""
+                )
+                if isinstance(reason_text, str) and reason_text.strip():
+                    r_summary = reason_text.strip().replace("\r", " ").replace("\n", " ")
+                    if len(r_summary) > 500:
+                        r_summary = r_summary[:497] + "..."
+                    self.store.append_event(task_id, {
+                        "type": "reasoning",
+                        "role": "system",
+                        "ts": utc_timestamp(),
+                        "text": r_summary,
+                    })
+                    return
+                # 无内容的 reasoning 块：记录存在但不带文本
+                self.store.append_event(task_id, {
+                    "type": "reasoning",
+                    "role": "system",
+                    "ts": utc_timestamp(),
+                    "text": "[Codex 正在思考…]",
                 })
                 return
             # 不同 item 类型承载工具名的字段不同：
@@ -3376,6 +3419,26 @@ class A2AHandler(BaseHTTPRequestHandler):
                     break
             self._serve_monitor_ui(token)
             return
+        if path.startswith("/internal/tasks/"):
+            # 内部窄接口：单任务查询（SDK sidecar 专用，Bearer 已校验）
+            task_id = path[len("/internal/tasks/"):].split("/", 1)[0]
+            task = self.server.bridge.store.get(task_id)
+            if task is None:
+                self._send_json({"error": "task not found"}, 404)
+                return
+            # 精简字段（避免泄露内部细节）
+            status = task.get("status") or {}
+            self._send_json({
+                "id": task.get("id"),
+                "state": status.get("state"),
+                "direction": task.get("direction"),
+                "contextId": task.get("contextId"),
+                "created_at": task.get("created_at"),
+                "finished_at": task.get("finished_at"),
+                "summary": task.get("summary", ""),
+            })
+            return
+
         if path == "/tasks":
             self._serve_task_list()
             return
@@ -3441,6 +3504,30 @@ class A2AHandler(BaseHTTPRequestHandler):
             return
         if not isinstance(params, dict):
             self._rpc_error(req_id, -32602, "params must be an object")
+            return
+
+        # ---- internal/* 内部窄接口（SDK sidecar 专用，Bearer 已校验）----
+        if method == "internal/submit":
+            prompt = str(params.get("prompt", ""))
+            context_id = str(params.get("context_id", "") or "")
+            if not prompt.strip():
+                self._rpc_error(req_id, -32602, "prompt is required")
+                return
+            try:
+                task_id = self.server.bridge.start_task(prompt, context_id)
+                self._send_json({"ok": True, "task_id": task_id})
+            except Exception as e:  # pragma: no cover
+                logging.exception("internal/submit failed")
+                self._rpc_error(req_id, -32603, f"submit failed: {e}")
+            return
+
+        if method == "internal/cancel":
+            task_id = str(params.get("task_id", ""))
+            if not task_id:
+                self._rpc_error(req_id, -32602, "task_id is required")
+                return
+            ok, message, _ = self.server.bridge.delete_task(task_id)
+            self._send_json({"ok": ok, "message": message})
             return
 
         if method in ("SendMessage", "message/send"):
@@ -3626,6 +3713,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     parser.add_argument("--state-dir", type=Path, default=Path(__file__).resolve().parent / ".codex-a2a")
     parser.add_argument("--codex", help="Path to codex.exe or codex.cmd")
+    parser.add_argument("--max-tasks", type=int, default=100,
+                        help="tasks.json 上限（默认 100，超出自动淘汰最旧任务）")
     parser.add_argument("--model", default="")
     parser.add_argument("--sync-wait", type=int, default=DEFAULT_SYNC_WAIT)
     parser.add_argument("--codex-timeout", type=int, default=DEFAULT_CODEX_TIMEOUT)
@@ -3673,6 +3762,9 @@ def main() -> None:
     find_codex_executable(codex_hint)
 
     cleanup_residual_state(state_dir)
+    if args.max_tasks < 1:
+        parser.error("--max-tasks must be >= 1")
+
     bridge = CodexBridge(
         codex=codex_hint,
         workspace=args.workspace,
@@ -3681,6 +3773,7 @@ def main() -> None:
         sync_wait=args.sync_wait,
         codex_timeout=args.codex_timeout,
         max_concurrent=args.max_concurrent,
+        max_tasks=args.max_tasks,
         token=token,
         inbound_token=args.inbound_token,
     )

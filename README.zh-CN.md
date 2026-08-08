@@ -265,6 +265,79 @@ python tests/mcp_profile_test.py
 python tests/test_codex_a2a_bridge.py
 ```
 
+## A2A SDK Sidecar（可选组件，标准 A2A 接入层）
+
+现有桥（:9998）是**私有协议 + 本地 loopback**，只服务 Codex。若未来需要**第三方标准 A2A agent** 接入（远程部署、开放生态），提供可选 sidecar：
+
+```
+标准 A2A 客户端 → sidecar (:10000, A2A 1.0) → 桥 (:9998) → Codex
+```
+
+### 架构原则（不破坏现有协作）
+
+- sidecar 是**独立进程**，默认不启动；现有桥 :9998 照常工作
+- 桥仍是**唯一执行者和状态权威**（Codex 进程/监控页/私有协议全不动）
+- sidecar 只做"标准 A2A 传输翻译"，经 `internal/*` 端点调桥
+- SDK 任务与现有任务**共享桥状态源**（监控页可见）
+
+### 安装（可选）
+
+```bash
+pip install "hermes-codex-bridge[a2a]"   # 或：pip install a2a-sdk[http-server,fastapi]
+```
+
+### 启动
+
+```powershell
+# 本地最小（HTTP :10000，内存态）
+powershell -File start_a2a_sidecar.ps1
+
+# 全特性（持久化 + gRPC + 推送）
+powershell -File start_a2a_sidecar.ps1 -Db sidecar_tasks.db -GrpcPort 50051 -Push
+
+# 远程部署（Bearer 鉴权 + 独立 token）
+powershell -File start_a2a_sidecar.ps1 -RequireToken -SidecarToken <你的token>
+```
+
+参数速查：
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `-Port` | 10000 | HTTP 监听端口 |
+| `-Db` | 空 | SQLite 文件路径（持久化；空=内存态，重启丢失）|
+| `-GrpcPort` | 0 | gRPC 监听端口（0=不启用；建议 50051）|
+| `-Push` | 关 | 启用推送通知（任务状态主动推给客户端 webhook）|
+| `-RequireToken` | 关 | 远程部署加固（所有端点需 Bearer token）|
+| `-SidecarToken` | 空 | sidecar 自身 token（RequireToken 时；空=复用桥 token）|
+| `-Reasoning` | 关 | 向客户端暴露 Codex 推理事件（默认关：保护模型内部推理隐私）|
+| `-BridgeUrl` | :9998 | 内部桥地址 |
+
+> 安全：绑定非 loopback 地址（`-Host 0.0.0.0`）时**强制**需要 `-RequireToken`，
+> 且禁止复用桥管理 token（需 `-SidecarToken` 独立指定）。
+
+### 验证
+
+```bash
+curl http://127.0.0.1:10000/health          # {"ok":true,"service":"a2a-sidecar"}
+curl http://127.0.0.1:10000/.well-known/agent-card.json   # 标准 AgentCard
+```
+
+### 安全
+
+- 默认只绑 `127.0.0.1`；远程部署必须 `--require-token`
+- sidecar 崩溃/关闭**不影响**桥 :9998（进程隔离）
+- 私有路由（/inbound/events、管理端点）**永不暴露**给 sidecar
+
+### 文件
+
+| 文件 | 职责 |
+|------|------|
+| `a2a_sidecar.py` | sidecar 主程序（AgentExecutor + FastAPI + 鉴权）|
+| `http_task_service.py` | HttpTaskService（TaskService 的 HTTP 实现，调桥 internal/*）|
+| `task_service.py` | TaskService 窄接口（Protocol + DTO + 适配器）|
+| `a2a_sdk_contract_check.py` | SDK 客户端契约测试（集成，需 sidecar + a2a-sdk 环境）|
+| `start_a2a_sidecar.ps1` | 启动脚本 |
+
 ## License
 
 MIT

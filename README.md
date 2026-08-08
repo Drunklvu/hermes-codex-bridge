@@ -277,6 +277,81 @@ python tests/mcp_profile_test.py
 python tests/test_codex_a2a_bridge.py
 ```
 
+## A2A SDK Sidecar (optional, standard A2A access layer)
+
+The core bridge (`:9998`) speaks a **private protocol on loopback** and serves Codex only.
+If you ever need **third-party standard A2A agents** (remote deployment, open ecosystem),
+an optional sidecar provides the standard A2A 1.0 entry point:
+
+```
+Standard A2A client → sidecar (:10000, A2A 1.0) → bridge (:9998) → Codex
+```
+
+### Architecture (non-breaking)
+
+- The sidecar is a **separate process**, off by default; the existing bridge keeps working as-is.
+- The bridge stays the **single executor and state authority** (Codex process, dashboard, private protocol untouched).
+- The sidecar only does **standard A2A transport translation**, calling the bridge via `internal/*` endpoints.
+- SDK tasks and existing tasks **share the bridge state source** (visible in the dashboard).
+
+### Install (optional)
+
+```bash
+pip install "hermes-codex-bridge[a2a]"   # or: pip install a2a-sdk[http-server,fastapi]
+```
+
+### Start
+
+```powershell
+# Local minimal (HTTP :10000, in-memory)
+powershell -File start_a2a_sidecar.ps1
+
+# Full features (persistence + gRPC + push)
+powershell -File start_a2a_sidecar.ps1 -Db sidecar_tasks.db -GrpcPort 50051 -Push
+
+# Remote deployment (Bearer auth + dedicated token)
+powershell -File start_a2a_sidecar.ps1 -RequireToken -SidecarToken <your-token>
+```
+
+Parameter reference:
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `-Port` | 10000 | HTTP listen port |
+| `-Db` | empty | SQLite file path (persistence; empty = in-memory, lost on restart) |
+| `-GrpcPort` | 0 | gRPC listen port (0 = disabled; suggested 50051) |
+| `-Push` | off | Enable push notifications (task status pushed to client webhook) |
+| `-RequireToken` | off | Remote hardening (all endpoints require Bearer token) |
+| `-SidecarToken` | empty | Sidecar's own token (when RequireToken; empty = reuse bridge token) |
+| `-Reasoning` | off | Expose Codex reasoning events to clients (off by default: keep internal reasoning private) |
+| `-BridgeUrl` | :9998 | Internal bridge address |
+
+> Security: binding a non-loopback address (`-Host 0.0.0.0`) **requires** `-RequireToken`,
+> and reusing the bridge admin token is forbidden (use a dedicated `-SidecarToken`).
+
+### Verify
+
+```bash
+curl http://127.0.0.1:10000/health          # {"ok":true,"service":"a2a-sidecar"}
+curl http://127.0.0.1:10000/.well-known/agent-card.json   # standard AgentCard
+```
+
+### Security
+
+- Binds `127.0.0.1` by default; remote deployment must use `--require-token`.
+- Sidecar crash/shutdown does **not** affect the bridge `:9998` (process isolation).
+- Private routes (`/inbound/events`, admin endpoints) are **never exposed** to the sidecar.
+
+### Files
+
+| File | Role |
+|------|------|
+| `a2a_sidecar.py` | Sidecar entry (AgentExecutor + FastAPI + auth) |
+| `http_task_service.py` | HttpTaskService (HTTP implementation of TaskService calling bridge `internal/*`) |
+| `task_service.py` | TaskService narrow interface (Protocol + DTOs + adapters) |
+| `a2a_sdk_contract_check.py` | SDK client contract tests (integration; needs sidecar + a2a-sdk) |
+| `start_a2a_sidecar.ps1` | Start script |
+
 ## License
 
 MIT

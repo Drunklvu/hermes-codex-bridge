@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-codex-bridge"
+version = "0.2.0"
+description = "Bidirectional A2A bridge between Hermes and Codex (zero-dependency core + optional standard A2A SDK sidecar)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# 核心零依赖（纯 stdlib），可选组件走 extra
+dependencies = []
+
+[project.optional-dependencies]
+# 标准 A2A SDK sidecar（阶段 2-6）：第三方标准 A2A agent 接入
+a2a = [
+    "a2a-sdk[http-server,fastapi]>=1.1.2,<2.0",
+]
+
+[tool.setuptools]
+py-modules = [
+    "codex_a2a_bridge",
+    "hermes_mcp_server",
+    "task_service",
+    "http_task_service",
+    "a2a_sidecar",
+]
