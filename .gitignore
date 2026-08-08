@@ -45,3 +45,7 @@ scripts/start_bridge.ps1
 # SQLite (a2a sidecar persistence)
 *.db
 *.sqlite
+
+# Coverage
+.coverage
+htmlcov/
