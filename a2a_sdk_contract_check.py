@@ -54,7 +54,7 @@ async def main() -> int:
         req.message.CopyFrom(Message(
             message_id=str(uuid.uuid4()),
             role="ROLE_USER",
-            parts=[Part(text="hello from a2a client")],
+            parts=[Part(text="请只回复OK两个字，不要调用任何工具，不要执行任何操作")],
         ))
         task_id = None
         async for event in client.send_message(req):
@@ -125,7 +125,7 @@ async def main() -> int:
         req2.message.CopyFrom(Message(
             message_id=req.message.message_id,  # 复用同一个 message_id
             role="ROLE_USER",
-            parts=[Part(text="hello from a2a client")],
+            parts=[Part(text="请只回复OK两个字，不要调用任何工具，不要执行任何操作")],
         ))
         first_task = None
         async for ev in client.send_message(req2):

@@ -623,8 +623,9 @@ def main() -> int:
     if not is_loopback and not args.require_token:
         logger.error("绑定非 loopback 地址（%s）必须启用 --require-token", args.host)
         return 1
-    if not is_loopback and args.sidecar_token == token and token:
-        logger.error("远程部署禁止复用桥管理 token，请用 --sidecar-token 指定独立 token")
+    if not is_loopback and (not args.sidecar_token or args.sidecar_token == token):
+        # 远程部署必须显式指定独立 sidecar token，且不得与桥管理 token 相同
+        logger.error("远程部署必须用 --sidecar-token 指定独立 token（禁止复用桥管理 token）")
         return 1
     if args.require_token:
         auth_token = args.sidecar_token or token

@@ -15,8 +15,14 @@ dependencies = []
 
 [project.optional-dependencies]
 # 标准 A2A SDK sidecar（阶段 2-6）：第三方标准 A2A agent 接入
+# 完整能力：协议 + 持久化（sqlalchemy/aiosqlite）+ gRPC（grpcio）+ 追踪（opentelemetry）
 a2a = [
     "a2a-sdk[http-server,fastapi]>=1.1.2,<2.0",
+    "sqlalchemy>=2.0",
+    "aiosqlite>=0.20",
+    "grpcio>=1.60",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-api>=1.20",
 ]
 
 [tool.setuptools]
