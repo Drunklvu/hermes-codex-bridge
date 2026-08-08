@@ -1028,7 +1028,7 @@ async function refreshTasks() {
       const row2 = el("div", "row2", null);
       const lastTs = gtasks.map(t => t.created_at || "").sort().pop() || "";
       row2.appendChild(el("span", "ts", fmtTime(lastTs)));
-      const genMatch = String(ctx).match(/#(\d{2})$/);
+      const genMatch = String(ctx).match(/#(\\d{2})$/);
       if (genMatch) {
         const gen = el("span", "gen", "#" + genMatch[1]);
         gen.title = "第 " + genMatch[1] + " 代";
