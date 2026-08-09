@@ -10,10 +10,10 @@ jobs:
     name: Unit tests (stdlib only)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # full history for the secrets scan job
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
       - name: Run unit tests (zero-dependency core)
@@ -23,8 +23,8 @@ jobs:
     name: Coverage gate (>= 60% branch, must never regress)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
       - name: Install coverage
@@ -42,7 +42,7 @@ jobs:
     name: Secrets & path scan (release safety net)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # scan git history too
       - name: Scan tracked files + git history for secrets / local paths / business words
