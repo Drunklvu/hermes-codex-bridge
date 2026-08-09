@@ -21,7 +21,12 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from a2a.client import create_client  # noqa: E402
+try:
+    from a2a.client import create_client  # noqa: E402
+except ImportError:
+    print("a2a-sdk 未安装。本脚本是 SDK 契约测试，需要 a2a-sdk：", file=sys.stderr)
+    print("    pip install 'hermes-codex-bridge[a2a]'", file=sys.stderr)
+    sys.exit(1)
 from a2a.types import (  # noqa: E402
     CancelTaskRequest,
     GetTaskRequest,
