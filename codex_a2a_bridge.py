@@ -38,7 +38,7 @@ MAX_STDERR_CHARS = 120_000
 STDOUT_TAIL_LINES = 200
 EVENT_LOG_LINES = 500  # 每任务保留的结构化事件条数（实时监控用）
 INBOUND_EVENT_LIMIT = 100  # inbound 任务事件条数上限
-INBOUND_SUMMARY_CHARS = 400  # inbound message/reply 摘要长度上限
+INBOUND_SUMMARY_CHARS = 5000  # inbound message/reply 摘要长度上限（与出站 prompt 2000/回复 20000 对齐）
 INBOUND_STUCK_TIMEOUT = 300  # inbound 任务 started 后 300s 无 finished 视为卡死（秒）
 # 工作线健康阈值（warning 提示，rotate 由 P4 启用）
 WS_WARN_TOKEN_BUDGET = 400_000   # 估算 token 预算（warning 60%）
