@@ -868,7 +868,10 @@ function renderConversation(messages, source) {
     } else {
       bubble.appendChild(btext);
     }
-    const bmeta = el("div", "bmeta", (role === "user" ? "Hermes" : "Codex") + " · " + fmtClock(m.ts));
+    // 身份显示：出站（Hermes→Codex）user=Hermes 发任务；入站（Codex→Hermes）user=Codex 调用方
+    const who = (role === "user" ? "Hermes" : "Codex");
+    const whoIn = (role === "user" ? "Codex" : "Hermes");
+    const bmeta = el("div", "bmeta", (source === "inbound-report" ? whoIn : who) + " · " + fmtClock(m.ts));
     bubble.appendChild(bmeta);
     // 组装：user 头像在右（先气泡后头像），assistant 头像在左
     if (side === "me") { msg.appendChild(bubble); msg.appendChild(avatar); }
