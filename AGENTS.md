@@ -92,9 +92,9 @@ tests load it via `importlib.util.spec_from_file_location` (see
   `>=6.33.5,<7.0`). grpcio/grpcio-tools must stay at **1.74.x** (1.74 supports
   protobuf `>=6.31.1,<7.0`; 1.83 wants `>=7.35.1` and breaks `pip check`).
   Lock: `grpcio==1.74.0 grpcio-tools==1.74.0`.
-- **AgentCard signing is fail-open**: a `--sign-key` failure logs and continues
-  unsigned; `/health` and AgentCard stay anonymously reachable in remote mode
-  (discovery endpoints are anonymous per the A2A spec) — documented trade-off.
+- **AgentCard signing is fail-closed**: a `--sign-key` failure aborts startup
+  (no unsigned fallback). `/health` and AgentCard stay anonymously reachable
+  in remote mode (discovery endpoints are anonymous per the A2A spec).
 
 ## Common pitfalls (learned the hard way)
 
