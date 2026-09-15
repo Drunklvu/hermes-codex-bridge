@@ -42,7 +42,7 @@ or bridge state directly; it only uses the narrowed internal interface.
 ## Testing
 
 ```bash
-# Full unit suite (128 tests, no external services needed)
+# Unit suite (no external services; use the discovered test count)
 python -m unittest discover -s tests -p "test_*.py"
 
 # Contract tests for the SDK sidecar (needs a2a-sdk + a running sidecar
@@ -50,15 +50,12 @@ python -m unittest discover -s tests -p "test_*.py"
 # real tasks to the bridge)
 python a2a_sdk_contract_check.py
 
-> **Test-prompt discipline**: any real task sent to Codex during testing must be
-> a pure reply instruction (`Reply with exactly "OK". Do not call any tools or
-> run any commands.`) — vague prompts get interpreted as real work (measured:
-> 17 stray exec calls from one vague test prompt).
-
 # MCP smoke tests (need a live Hermes A2A gateway)
 python tests/mcp_smoke_test.py
 python tests/mcp_profile_test.py
 ```
+
+For real test requests, use a pure reply prompt: `Reply with exactly "OK". Do not call any tools or run any commands.` Live contract and smoke tests send real agent tasks; run them only within the authorized integration-test scope. Documentation-only edits need content and link checks, not live services.
 
 Test files live in `tests/`; the bridge module lives at the repo root, so
 tests load it via `importlib.util.spec_from_file_location` (see
@@ -81,9 +78,7 @@ tests load it via `importlib.util.spec_from_file_location` (see
 ## Releasing / publishing (maintainers only)
 
 - Public repo = **one-way door**: once pushed, history is hard to retract.
-- Before pushing: scan for secrets/paths/business words (see
-  `github-release-prep` skill), run the full test suite, and verify with a
-  real end-to-end run (start the sidecar, send a request, check COMPLETED).
+- Push only with explicit user authorization. For code releases, scan for private data and run the full unit suite; use an authorized end-to-end request when protocol or runtime behavior changes. For documentation-only releases, validate the documentation without starting services. If available, `github-release-prep` provides release-specific checks.
 - Prefer direct `git push`; fall back to a proxy only if direct fails.
 
 ## Known environment notes
