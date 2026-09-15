@@ -1,3 +1,4 @@
+import datetime
 import importlib.util
 import json
 import uuid
@@ -922,7 +923,11 @@ class WorkstreamHealthTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def _seed(self, name, tokens=0, msgs=0, size=0, last="2026-08-06T12:00:00.000Z"):
+    def _seed(self, name, tokens=0, msgs=0, size=0, last=None):
+        if last is None:
+            # 相对当前时间：固定时间戳会随真实时间推移过期，导致 idle 误判为 warning/rotate
+            last = (datetime.datetime.now(datetime.timezone.utc)
+                    - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         ctx = self.store.resolve_workstream(name)
         self.store.touch_workstream(name, session_id="019f-x", message_count=msgs, estimated_tokens=tokens, file_size=size)
         # 直接改 last_used_at 控制空闲
